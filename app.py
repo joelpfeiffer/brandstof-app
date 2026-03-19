@@ -14,16 +14,34 @@ st.set_page_config(page_title="Brandstof", layout="centered")
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
+# basis client (zonder auth)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------
-# SESSION FIX
+# SESSION
 # -------------------------
 if "user" not in st.session_state:
     st.session_state.user = None
 
+if "session" not in st.session_state:
+    st.session_state.session = None
+
 # -------------------------
-# OCR CLIENT (CACHED)
+# AUTH CLIENT (BELANGRIJK)
+# -------------------------
+def get_auth_client():
+    return create_client(
+        SUPABASE_URL,
+        SUPABASE_KEY,
+        options={
+            "headers": {
+                "Authorization": f"Bearer {st.session_state.session.access_token}"
+            }
+        }
+    )
+
+# -------------------------
+# OCR CLIENT
 # -------------------------
 @st.cache_resource
 def get_vision_client():
@@ -36,7 +54,7 @@ def get_vision_client():
             "token_uri": "https://oauth2.googleapis.com/token",
         })
         return vision.ImageAnnotatorClient(credentials=credentials)
-    except Exception as e:
+    except:
         return None
 
 vision_client = get_vision_client()
@@ -45,10 +63,10 @@ vision_client = get_vision_client()
 # CACHE DATA
 # -------------------------
 @st.cache_data(ttl=10)
-def load_data(user_id):
-    return supabase.table("tankbeurten") \
+def load_data():
+    auth_supabase = get_auth_client()
+    return auth_supabase.table("tankbeurten") \
         .select("id, datum, liters, prijs, km, totaal, brandstof, station") \
-        .eq("user_id", user_id) \
         .order("datum", desc=True) \
         .execute().data
 
@@ -85,18 +103,17 @@ def login():
                 "password": password
             })
 
-            if res.user:
-                st.session_state.user = res.user
-                st.success("Ingelogd")
-                st.rerun()
-            else:
-                st.error("Login mislukt")
+            st.session_state.user = res.user
+            st.session_state.session = res.session
+
+            st.success("Ingelogd")
+            st.rerun()
 
         except Exception as e:
             st.error(f"Login fout: {e}")
 
 # -------------------------
-# NIEUWE ENTRY
+# NIEUWE TANKBEURT
 # -------------------------
 def nieuwe_tankbeurt():
 
@@ -120,7 +137,7 @@ def nieuwe_tankbeurt():
 
             st.success("OCR toegepast")
 
-        except Exception as e:
+        except:
             st.warning("OCR mislukt")
 
     liters = st.number_input("Liters", value=float(liters))
@@ -141,7 +158,9 @@ def nieuwe_tankbeurt():
 
     if st.button("Opslaan", use_container_width=True):
         try:
-            supabase.table("tankbeurten").insert({
+            auth_supabase = get_auth_client()
+
+            auth_supabase.table("tankbeurten").insert({
                 "user_id": st.session_state.user.id,
                 "datum": str(datetime.today().date()),
                 "liters": liters,
@@ -166,7 +185,7 @@ def dashboard():
 
     st.subheader("Dashboard")
 
-    data = load_data(st.session_state.user.id)
+    data = load_data()
 
     if not data:
         st.info("Nog geen data")
@@ -188,8 +207,15 @@ def dashboard():
 
     with st.expander("Verwijderen"):
         delete_id = st.selectbox("Selecteer", df["id"])
+
         if st.button("Verwijder"):
-            supabase.table("tankbeurten").delete().eq("id", delete_id).execute()
+            auth_supabase = get_auth_client()
+
+            auth_supabase.table("tankbeurten") \
+                .delete() \
+                .eq("id", delete_id) \
+                .execute()
+
             st.cache_data.clear()
             st.rerun()
 
@@ -211,4 +237,5 @@ else:
 
     if st.button("Logout"):
         st.session_state.user = None
+        st.session_state.session = None
         st.rerun()
