@@ -1,0 +1,7 @@
+streamlit
+pandas
+supabase
+streamlit-cookies-manager
+google-cloud-vision
+streamlit-geolocation
+requests
