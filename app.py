@@ -2,12 +2,13 @@ import streamlit as st
 import pandas as pd
 import re
 import requests
+import os
+import tempfile
+
 from supabase import create_client
 from streamlit_cookies_manager import EncryptedCookieManager
 from google.cloud import vision
-from google.oauth2 import service_account
 from streamlit_geolocation import streamlit_geolocation
-import json
 
 # ------------------------
 # CONFIG
@@ -17,20 +18,27 @@ st.set_page_config(page_title="Brandstof", layout="centered")
 st.markdown('<link rel="manifest" href="/.streamlit/manifest.json">', unsafe_allow_html=True)
 
 # ------------------------
-# SUPABASE (via secrets)
+# SUPABASE (SECRETS)
 # ------------------------
 url = st.secrets["SUPABASE_URL"]
 key = st.secrets["SUPABASE_KEY"]
 supabase = create_client(url, key)
 
 # ------------------------
-# GOOGLE OCR (via secrets)
+# GOOGLE OCR (FIXED)
 # ------------------------
 vision_client = None
+
 if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in st.secrets:
-    creds_dict = json.loads(st.secrets["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
-    credentials = service_account.Credentials.from_service_account_info(creds_dict)
-    vision_client = vision.ImageAnnotatorClient(credentials=credentials)
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+            f.write(st.secrets["GOOGLE_APPLICATION_CREDENTIALS_JSON"].encode())
+            temp_path = f.name
+
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
+        vision_client = vision.ImageAnnotatorClient()
+    except:
+        vision_client = None
 
 # ------------------------
 # COOKIES
@@ -174,7 +182,7 @@ def get_address(lat, lon):
         return ""
 
 # ------------------------
-# NIEUWE INVOER
+# INPUT
 # ------------------------
 if page == "Nieuwe invoer":
 
@@ -273,12 +281,12 @@ if page == "Dashboard":
     delete_id = st.selectbox("Selecteer record", df["id"])
     confirm = st.checkbox("Bevestig verwijderen")
 
-    st.subheader("Overzicht")
-
-    cols = [c for c in df.columns if c not in ["id", "user_id"]]
-    st.dataframe(df[cols], use_container_width=True)\
-
     if st.button("Verwijder record") and confirm:
         supabase.table("tankbeurten").delete().eq("id", delete_id).execute()
         st.success("Record verwijderd")
         st.rerun()
+
+    st.subheader("Overzicht")
+
+    cols = [c for c in df.columns if c not in ["id", "user_id"]]
+    st.dataframe(df[cols], use_container_width=True)
