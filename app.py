@@ -1,292 +1,210 @@
 import streamlit as st
-import pandas as pd
-import re
-import requests
-import os
-import tempfile
-
 from supabase import create_client
-from streamlit_cookies_manager import EncryptedCookieManager
-from google.cloud import vision
-from streamlit_geolocation import streamlit_geolocation
+import pandas as pd
+from datetime import date
 
 # ------------------------
 # CONFIG
 # ------------------------
-st.set_page_config(page_title="Brandstof", layout="centered")
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
-st.markdown('<link rel="manifest" href="/.streamlit/manifest.json">', unsafe_allow_html=True)
+# BASE CLIENT (voor login)
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ------------------------
-# SUPABASE (SECRETS)
-# ------------------------
-url = st.secrets["SUPABASE_URL"]
-key = st.secrets["SUPABASE_KEY"]
-supabase = create_client(url, key)
 
 # ------------------------
-# GOOGLE OCR (FIXED)
+# AUTH CLIENT (BELANGRIJK!)
 # ------------------------
-vision_client = None
+def get_auth_client():
+    if "session" not in st.session_state:
+        return None
 
-if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in st.secrets:
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
-            f.write(st.secrets["GOOGLE_APPLICATION_CREDENTIALS_JSON"].encode())
-            temp_path = f.name
+    return create_client(
+        SUPABASE_URL,
+        SUPABASE_KEY,
+        options={
+            "headers": {
+                "Authorization": f"Bearer {st.session_state.session.session.access_token}"
+            }
+        },
+    )
 
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
-        vision_client = vision.ImageAnnotatorClient()
-    except:
-        vision_client = None
-
-# ------------------------
-# COOKIES
-# ------------------------
-cookies = EncryptedCookieManager(prefix="app", password="123")
-
-if not cookies.ready():
-    st.stop()
 
 # ------------------------
-# SESSION
+# SESSION INIT
 # ------------------------
-if "user" not in st.session_state:
-    st.session_state.user = None
+if "session" not in st.session_state:
+    st.session_state.session = None
+
+if "user_id" not in st.session_state:
     st.session_state.user_id = None
 
-# ------------------------
-# LOGIN HERSTEL
-# ------------------------
-if not st.session_state.user:
-    access = cookies.get("access_token")
-    refresh = cookies.get("refresh_token")
+if "page" not in st.session_state:
+    st.session_state.page = "login"
 
-    if access and refresh:
-        try:
-            supabase.auth.set_session(access, refresh)
-            user = supabase.auth.get_user()
-            st.session_state.user = user.user
-            st.session_state.user_id = user.user.id
-        except:
-            pass
 
 # ------------------------
 # LOGIN
 # ------------------------
-if not st.session_state.user:
-
+def login():
     st.title("Brandstof App")
 
     email = st.text_input("Email")
     password = st.text_input("Wachtwoord", type="password")
 
-    if st.button("Inloggen", use_container_width=True):
-        res = supabase.auth.sign_in_with_password({
-            "email": email,
-            "password": password
-        })
+    if st.button("Login"):
+        try:
+            res = supabase.auth.sign_in_with_password({
+                "email": email,
+                "password": password
+            })
 
-        st.session_state.user = res.user
-        st.session_state.user_id = res.user.id
+            st.session_state.session = res
+            st.session_state.user_id = res.user.id
+            st.session_state.page = "home"
 
-        cookies["access_token"] = res.session.access_token
-        cookies["refresh_token"] = res.session.refresh_token
-        cookies.save()
+            st.rerun()
 
-        st.rerun()
+        except Exception as e:
+            st.error("Login mislukt")
 
-    st.stop()
 
 # ------------------------
-# HEADER
+# LOGOUT
 # ------------------------
-st.title("Brandstof App")
-st.caption(f"Ingelogd als {st.session_state.user.email}")
-
-if st.button("Uitloggen", use_container_width=True):
-    st.session_state.user = None
-    cookies.clear()
+def logout():
+    st.session_state.session = None
+    st.session_state.user_id = None
+    st.session_state.page = "login"
     st.rerun()
 
-st.divider()
 
 # ------------------------
-# MENU
+# NAVIGATIE
 # ------------------------
-page = st.segmented_control("Navigatie", ["Nieuwe invoer", "Dashboard"])
+def navigation():
+    col1, col2, col3 = st.columns(3)
 
-# ------------------------
-# STATION LIJST
-# ------------------------
-stations = [
-    "shell","bp","esso","texaco","total","totalenergies",
-    "q8","avia","tango","tinq","firezone","tamoil",
-    "gulf","argos","haan","fieten","sakko",
-    "berkman","pin&go","pingo","ok"
-]
+    with col1:
+        if st.button("Nieuwe tankbeurt"):
+            st.session_state.page = "nieuw"
 
-def detect_station(text):
-    for s in stations:
-        if s in text:
-            return s.title()
-    return ""
+    with col2:
+        if st.button("Dashboard"):
+            st.session_state.page = "dashboard"
+
+    with col3:
+        if st.button("Logout"):
+            logout()
+
 
 # ------------------------
-# OCR
+# NIEUWE TANKBEURT
 # ------------------------
-def scan_bon(file):
-    if not vision_client:
-        return ""
-    image = vision.Image(content=file.getvalue())
-    response = vision_client.text_detection(image=image)
-    if response.text_annotations:
-        return response.text_annotations[0].description
-    return ""
-
-# ------------------------
-# PARSING
-# ------------------------
-def parse_text(text):
-    text = text.lower().replace(",", ".")
-    nums = [float(n) for n in re.findall(r"\d+\.\d+", text)]
-
-    liters = prijs = totaal = None
-
-    m = re.search(r"(95|98|diesel)[^\d]*(\d+\.\d+)", text)
-    if m:
-        liters = float(m.group(2))
-
-    prijzen = [n for n in nums if 1 < n < 3]
-    if prijzen:
-        prijs = prijzen[0]
-
-    totals = [n for n in nums if 10 < n < 200]
-    if totals:
-        totaal = max(totals)
-
-    if not liters and prijs and totaal:
-        liters = totaal / prijs
-
-    return liters, prijs, totaal
-
-# ------------------------
-# ADRES
-# ------------------------
-def get_address(lat, lon):
-    try:
-        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}"
-        headers = {"User-Agent": "brandstof-app"}
-        return requests.get(url, headers=headers).json().get("display_name", "")
-    except:
-        return ""
-
-# ------------------------
-# INPUT
-# ------------------------
-if page == "Nieuwe invoer":
-
+def nieuwe_tankbeurt():
     st.subheader("Nieuwe tankbeurt")
 
-    uploaded = st.file_uploader("Upload bon", type=["jpg","png","jpeg"])
+    datum = st.date_input("Datum", value=date.today())
+    liters = st.number_input("Liters", min_value=0.0)
+    prijs = st.number_input("Prijs per liter (€)", min_value=0.0)
+    km = st.number_input("Gereden km", min_value=0.0)
 
-    ocr_liters = ocr_prijs = None
-    station_auto = ""
+    totaal = liters * prijs
+    kosten_per_km = totaal / km if km > 0 else 0
 
-    if uploaded:
-        text = scan_bon(uploaded)
-        st.expander("Herkende tekst").write(text)
+    st.write(f"Totaal: €{totaal:.2f}")
+    st.write(f"Kosten per km: €{kosten_per_km:.2f}")
 
-        ocr_liters, ocr_prijs, _ = parse_text(text)
-        station_auto = detect_station(text.lower())
+    if st.button("Opslaan"):
+        auth_supabase = get_auth_client()
 
-    loc = streamlit_geolocation()
-    lat = lon = None
+        if not auth_supabase:
+            st.error("Niet ingelogd")
+            return
 
-    if loc:
-        lat = loc["latitude"]
-        lon = loc["longitude"]
-
-    with st.form("form"):
-        datum = st.date_input("Datum")
-        liters = st.number_input("Liters", value=ocr_liters or 0.0)
-        prijs = st.number_input("Prijs (€)", value=ocr_prijs or 0.0)
-        km = st.number_input("Kilometers", min_value=0.0)
-        station = st.text_input("Tankstation", value=station_auto)
-
-        if st.form_submit_button("Opslaan"):
-            totaal = liters * prijs
-            adres = get_address(lat, lon) if lat else ""
-
-            supabase.table("tankbeurten").insert({
+        try:
+            auth_supabase.table("tankbeurten").insert({
                 "user_id": st.session_state.user_id,
                 "datum": str(datum),
                 "liters": liters,
                 "prijs": prijs,
                 "km": km,
-                "totaal": totaal,
-                "station": station,
-                "latitude": lat,
-                "longitude": lon,
-                "adres": adres
+                "totaal": totaal
             }).execute()
 
-            st.success("Tankbeurt opgeslagen")
+            st.success("Opgeslagen")
+
+        except Exception as e:
+            st.error("Opslaan mislukt (RLS?)")
+
 
 # ------------------------
 # DASHBOARD
 # ------------------------
-if page == "Dashboard":
+def dashboard():
+    st.subheader("Dashboard")
 
-    data = supabase.table("tankbeurten") \
-        .select("*") \
-        .eq("user_id", str(st.session_state.user_id)) \
-        .execute().data
+    auth_supabase = get_auth_client()
 
-    if not data:
-        st.info("Nog geen gegevens beschikbaar")
-        st.stop()
+    if not auth_supabase:
+        st.error("Niet ingelogd")
+        return
 
-    df = pd.DataFrame(data)
-    df["datum"] = pd.to_datetime(df["datum"])
+    try:
+        res = auth_supabase.table("tankbeurten").select("*").execute()
+        data = res.data
 
-    col1, col2, col3 = st.columns(3)
+        if not data:
+            st.warning("Geen data beschikbaar")
+            return
 
-    kosten = df["totaal"].sum()
-    km = df["km"].sum()
-    liters = df["liters"].sum()
+        df = pd.DataFrame(data)
 
-    col1.metric("Totale kosten", f"€{kosten:.2f}")
-    col2.metric("Km per liter", f"{km/liters:.2f}")
-    col3.metric("Kosten per km", f"€{kosten/km:.2f}")
+        # Verwijder interne kolommen
+        df = df.drop(columns=["id", "user_id"], errors="ignore")
 
-    st.divider()
+        st.dataframe(df, use_container_width=True)
 
-    st.subheader("Kosten over tijd")
-    st.line_chart(df.set_index("datum")["totaal"])
+        # Analyse
+        totaal_kosten = df["totaal"].sum()
+        totaal_km = df["km"].sum()
 
-    st.subheader("Kosten per maand")
-    df["maand"] = df["datum"].dt.to_period("M").astype(str)
-    st.bar_chart(df.groupby("maand")["totaal"].sum())
+        st.write(f"Totale kosten: €{totaal_kosten:.2f}")
 
-    map_df = df.dropna(subset=["latitude","longitude"])
-    if not map_df.empty:
-        st.subheader("Locaties")
-        st.map(map_df.rename(columns={"latitude":"lat","longitude":"lon"}))
+        if totaal_km > 0:
+            st.write(f"Gemiddeld € per km: €{totaal_kosten / totaal_km:.2f}")
 
-    st.divider()
+        # DELETE
+        st.subheader("Verwijderen")
 
-    st.subheader("Verwijderen")
+        ids = [row["id"] for row in data]
+        selected_id = st.selectbox("Selecteer record", ids)
 
-    delete_id = st.selectbox("Selecteer record", df["id"])
-    confirm = st.checkbox("Bevestig verwijderen")
+        if st.button("Verwijder"):
+            auth_supabase.table("tankbeurten").delete().eq("id", selected_id).execute()
+            st.success("Verwijderd")
+            st.rerun()
 
-    if st.button("Verwijder record") and confirm:
-        supabase.table("tankbeurten").delete().eq("id", delete_id).execute()
-        st.success("Record verwijderd")
-        st.rerun()
+    except Exception as e:
+        st.error("Fout bij ophalen data")
 
-    st.subheader("Overzicht")
 
-    cols = [c for c in df.columns if c not in ["id", "user_id"]]
-    st.dataframe(df[cols], use_container_width=True)
+# ------------------------
+# MAIN
+# ------------------------
+if st.session_state.session is None:
+    login()
+else:
+    st.success(f"Ingelogd als: {st.session_state.user_id}")
+
+    navigation()
+
+    if st.session_state.page == "nieuw":
+        nieuwe_tankbeurt()
+
+    elif st.session_state.page == "dashboard":
+        dashboard()
+
+    else:
+        st.title("Welkom")
