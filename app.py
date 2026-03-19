@@ -24,15 +24,14 @@ if "page" not in st.session_state:
     st.session_state.page = "login"
 
 # ------------------------
-# AUTH HEADERS (RLS FIX)
+# AUTH SESSION FIX
 # ------------------------
-def get_headers():
-    if "session" not in st.session_state or st.session_state.session is None:
-        return None
+def apply_session():
+    if st.session_state.session:
+        access_token = st.session_state.session.session.access_token
+        refresh_token = st.session_state.session.session.refresh_token
 
-    return {
-        "Authorization": f"Bearer {st.session_state.session.session.access_token}"
-    }
+        supabase.auth.set_session(access_token, refresh_token)
 
 # ------------------------
 # LOGIN
@@ -56,7 +55,7 @@ def login():
 
             st.rerun()
 
-        except Exception:
+        except Exception as e:
             st.error("Login mislukt")
 
 # ------------------------
@@ -104,28 +103,22 @@ def nieuwe_tankbeurt():
     st.write(f"Kosten per km: €{kosten_per_km:.2f}")
 
     if st.button("Opslaan"):
-        headers = get_headers()
-
-        if not headers:
-            st.error("Niet ingelogd")
-            return
-
         try:
-            supabase.table("tankbeurten") \
-                .insert({
-                    "user_id": st.session_state.user_id,
-                    "datum": str(datum),
-                    "liters": liters,
-                    "prijs": prijs,
-                    "km": km,
-                    "totaal": totaal
-                }) \
-                .execute(headers=headers)
+            apply_session()
+
+            supabase.table("tankbeurten").insert({
+                "user_id": st.session_state.user_id,
+                "datum": str(datum),
+                "liters": liters,
+                "prijs": prijs,
+                "km": km,
+                "totaal": totaal
+            }).execute()
 
             st.success("Opgeslagen")
 
-        except Exception:
-            st.error("Opslaan mislukt (RLS?)")
+        except Exception as e:
+            st.error(f"Opslaan mislukt: {e}")
 
 # ------------------------
 # DASHBOARD
@@ -133,17 +126,10 @@ def nieuwe_tankbeurt():
 def dashboard():
     st.subheader("Dashboard")
 
-    headers = get_headers()
-
-    if not headers:
-        st.error("Niet ingelogd")
-        return
-
     try:
-        res = supabase.table("tankbeurten") \
-            .select("*") \
-            .execute(headers=headers)
+        apply_session()
 
+        res = supabase.table("tankbeurten").select("*").execute()
         data = res.data
 
         if not data:
@@ -152,12 +138,9 @@ def dashboard():
 
         df = pd.DataFrame(data)
 
-        # Verberg interne kolommen
         df_display = df.drop(columns=["id", "user_id"], errors="ignore")
-
         st.dataframe(df_display, use_container_width=True)
 
-        # Analyse
         totaal_kosten = df["totaal"].sum()
         totaal_km = df["km"].sum()
 
@@ -166,25 +149,25 @@ def dashboard():
         if totaal_km > 0:
             st.write(f"Gemiddeld € per km: €{totaal_kosten / totaal_km:.2f}")
 
-        # ------------------------
         # DELETE
-        # ------------------------
         st.subheader("Verwijderen")
 
         ids = df["id"].tolist()
         selected_id = st.selectbox("Selecteer record", ids)
 
         if st.button("Verwijder"):
+            apply_session()
+
             supabase.table("tankbeurten") \
                 .delete() \
                 .eq("id", selected_id) \
-                .execute(headers=headers)
+                .execute()
 
             st.success("Verwijderd")
             st.rerun()
 
-    except Exception:
-        st.error("Fout bij ophalen data")
+    except Exception as e:
+        st.error(f"Fout bij ophalen data: {e}")
 
 # ------------------------
 # MAIN
