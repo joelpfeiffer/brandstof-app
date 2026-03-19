@@ -4,9 +4,22 @@ from datetime import datetime
 from supabase import create_client, ClientOptions
 from google.cloud import vision
 from google.oauth2 import service_account
+import streamlit.components.v1 as components
+from streamlit_cookies_manager import EncryptedCookieManager
 import re
 
 st.set_page_config(page_title="Brandstof", layout="centered")
+
+# -------------------------
+# COOKIES (LOGIN BEWAREN)
+# -------------------------
+cookies = EncryptedCookieManager(
+    prefix="brandstof_app",
+    password="super_secret_key"
+)
+
+if not cookies.ready():
+    st.stop()
 
 # -------------------------
 # CONFIG
@@ -17,23 +30,22 @@ SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------
-# TANKSTATIONS
-# -------------------------
-TANKSTATIONS = [
-    "Shell", "BP", "Esso", "Texaco", "Total", "Q8",
-    "Tango", "Firezone", "OK", "Gulf", "AVIA",
-    "Argos", "Tinq", "Sakko", "Lukoil",
-    "Fieten Olie", "Berkman", "De Haan", "Tamoil",
-    "Makro", "Sligro", "Anders"
-]
-
-# -------------------------
 # SESSION
 # -------------------------
 if "user" not in st.session_state:
     st.session_state.user = None
 if "session" not in st.session_state:
     st.session_state.session = None
+
+# -------------------------
+# AUTO LOGIN (via cookie)
+# -------------------------
+if st.session_state.session is None:
+    token = cookies.get("access_token")
+
+    if token:
+        st.session_state.session = type("obj", (), {"access_token": token})
+        st.session_state.user = type("obj", (), {"id": "cached_user"})
 
 # -------------------------
 # AUTH CLIENT
@@ -71,7 +83,7 @@ def get_vision_client():
 vision_client = get_vision_client()
 
 # -------------------------
-# OCR PARSE
+# OCR PARSER
 # -------------------------
 def parse_bon(text):
     text = text.lower()
@@ -87,26 +99,41 @@ def parse_bon(text):
         elif 1 < n < 5:
             prijs = n
 
-    if liters and prijs and prijs > 10:
-        prijs = prijs / liters
+    if liters and not prijs and numbers:
+        prijs = max(numbers) / liters
 
     return liters, prijs
 
 # -------------------------
-# GPS (simple)
+# GPS
 # -------------------------
-st.components.v1.html("""
+gps = components.html("""
 <script>
 navigator.geolocation.getCurrentPosition(
     (pos) => {
-        const coords = pos.coords.latitude + "," + pos.coords.longitude;
-        window.parent.postMessage({type: "streamlit:setComponentValue", value: coords}, "*");
+        const data = {
+            lat: pos.coords.latitude,
+            lon: pos.coords.longitude
+        };
+        window.parent.postMessage(
+            {isStreamlitMessage: true, type: "streamlit:setComponentValue", value: data},
+            "*"
+        );
     }
 );
 </script>
 """, height=0)
 
-gps = st.session_state.get("gps")
+# -------------------------
+# TANKSTATIONS
+# -------------------------
+TANKSTATIONS = [
+    "Shell", "BP", "Esso", "Texaco", "Total", "Q8",
+    "Tango", "Firezone", "OK", "Gulf", "AVIA",
+    "Argos", "Tinq", "Sakko", "Lukoil",
+    "Fieten Olie", "Berkman", "De Haan",
+    "Tamoil", "Makro", "Sligro", "Anders"
+]
 
 # -------------------------
 # LOGIN
@@ -123,79 +150,89 @@ def login():
                 "email": email,
                 "password": password
             })
+
             st.session_state.user = res.user
             st.session_state.session = res.session
+
+            cookies["access_token"] = res.session.access_token
+            cookies.save()
+
             st.rerun()
+
         except Exception as e:
             st.error(e)
 
 # -------------------------
-# NIEUWE TANKBEURT
+# NIEUWE ENTRY
 # -------------------------
 def nieuwe():
 
     st.subheader("Nieuwe tankbeurt")
 
-    uploaded = st.file_uploader("Upload bon", type=["jpg", "png", "jpeg"])
+    with st.form("tank_form", clear_on_submit=True):
 
-    liters = 0.0
-    prijs = 0.0
+        uploaded = st.file_uploader("Upload bon", type=["jpg", "png", "jpeg"])
 
-    if uploaded and vision_client:
-        image = vision.Image(content=uploaded.read())
-        response = vision_client.text_detection(image=image)
+        liters = 0.0
+        prijs = 0.0
 
-        text = response.text_annotations[0].description if response.text_annotations else ""
-        st.text_area("OCR tekst", text, height=120)
+        if uploaded and vision_client:
+            image = vision.Image(content=uploaded.read())
+            response = vision_client.text_detection(image=image)
 
-        l, p = parse_bon(text)
-        if l:
-            liters = l
-        if p:
-            prijs = p
+            text = response.text_annotations[0].description if response.text_annotations else ""
+            st.text_area("OCR tekst", text, height=120)
 
-    liters = st.number_input("Liters", value=liters)
-    prijs = st.number_input("Prijs per liter", value=prijs)
-    km = st.number_input("KM", value=0.0)
+            l, p = parse_bon(text)
+            if l:
+                liters = l
+            if p:
+                prijs = p
 
-    brandstof = st.selectbox("Brandstof", ["euro 95", "diesel", "euro 98"])
+        liters = st.number_input("Liters", value=liters)
+        prijs = st.number_input("Prijs per liter", value=prijs)
+        km = st.number_input("KM", value=0.0)
 
-    station = st.selectbox("Tankstation", TANKSTATIONS)
-    if station == "Anders":
-        station = st.text_input("Naam tankstation")
+        brandstof = st.selectbox("Brandstof", ["euro 95", "diesel", "euro 98"])
 
-    totaal = liters * prijs
-    st.metric("Totaal prijs", f"€ {totaal:.2f}")
+        station = st.selectbox("Tankstation", TANKSTATIONS)
+        if station == "Anders":
+            station = st.text_input("Naam tankstation")
 
-    if st.button("Opslaan"):
+        totaal = liters * prijs
+        st.metric("Totaal prijs", f"€ {totaal:.2f}")
 
-        auth = get_auth_client()
-        if auth is None:
-            return
+        submit = st.form_submit_button("Opslaan")
 
-        try:
+        if submit:
+
+            auth = get_auth_client()
+            if auth is None:
+                st.stop()
+
             lat, lon = None, None
-            if gps:
-                lat, lon = gps.split(",")
+            if gps and isinstance(gps, dict):
+                lat = gps.get("lat")
+                lon = gps.get("lon")
 
-            auth.table("tankbeurten").insert({
-                "user_id": st.session_state.user.id,
-                "datum": str(datetime.today().date()),
-                "liters": liters,
-                "prijs": prijs,
-                "km": km,
-                "totaal": totaal,
-                "brandstof": brandstof,
-                "station": station,
-                "latitude": lat,
-                "longitude": lon
-            }).execute()
+            try:
+                auth.table("tankbeurten").insert({
+                    "user_id": st.session_state.user.id,
+                    "datum": str(datetime.today().date()),
+                    "liters": liters,
+                    "prijs": prijs,
+                    "km": km,
+                    "totaal": totaal,
+                    "brandstof": brandstof,
+                    "station": station,
+                    "latitude": lat,
+                    "longitude": lon
+                }).execute()
 
-            st.success("Opgeslagen")
-            st.rerun()
+                st.success("Opgeslagen")
 
-        except Exception as e:
-            st.error(f"Opslaan fout: {e}")
+            except Exception as e:
+                st.error(f"Opslaan fout: {e}")
 
 # -------------------------
 # DASHBOARD
@@ -208,59 +245,38 @@ def dashboard():
     if auth is None:
         return
 
-    try:
-        data = auth.table("tankbeurten").select("*").execute().data
+    data = auth.table("tankbeurten").select("*").execute().data
 
-        if not data:
-            st.info("Geen data")
-            return
+    if not data:
+        st.info("Geen data")
+        return
 
-        df = pd.DataFrame(data)
+    df = pd.DataFrame(data)
+    df["datum"] = pd.to_datetime(df["datum"])
 
-        df["datum"] = pd.to_datetime(df["datum"])
+    totaal_kosten = df["totaal"].sum()
+    totaal_km = df["km"].sum()
+    kosten_per_km = totaal_kosten / totaal_km if totaal_km > 0 else 0
 
-        totaal_kosten = df["totaal"].sum()
-        totaal_km = df["km"].sum()
-        totaal_liters = df["liters"].sum()
+    col1, col2 = st.columns(2)
+    col1.metric("Totaal €", f"{totaal_kosten:.2f}")
+    col2.metric("€/km", f"{kosten_per_km:.3f}")
 
-        kosten_per_km = totaal_kosten / totaal_km if totaal_km > 0 else 0
-        gem_prijs = df["prijs"].mean()
+    df = df.sort_values("datum")
 
-        col1, col2 = st.columns(2)
-        col1.metric("Totaal €", f"{totaal_kosten:.2f}")
-        col2.metric("€/km", f"{kosten_per_km:.3f}")
+    st.line_chart(df.set_index("datum")["totaal"])
 
-        col1, col2 = st.columns(2)
-        col1.metric("Gem €/L", f"{gem_prijs:.2f}")
-        col2.metric("Beurten", len(df))
+    df_display = df.drop(columns=["id", "user_id", "latitude", "longitude"], errors="ignore")
+    st.dataframe(df_display, use_container_width=True)
 
-        df = df.sort_values("datum")
-
-        st.subheader("Kosten")
-        st.line_chart(df.set_index("datum")["totaal"])
-
-        st.subheader("Liters")
-        st.line_chart(df.set_index("datum")["liters"])
-
-        st.subheader("Overzicht")
-
-        df_display = df.drop(columns=["id", "user_id", "latitude", "longitude"], errors="ignore")
-
-        st.dataframe(df_display, use_container_width=True)
-
-        st.subheader("Kaart")
-
-        map_df = df.dropna(subset=["latitude", "longitude"])
-        if not map_df.empty:
-            st.map(map_df.rename(columns={"latitude": "lat", "longitude": "lon"}))
-
-    except Exception as e:
-        st.error(f"Dashboard fout: {e}")
+    map_df = df.dropna(subset=["latitude", "longitude"])
+    if not map_df.empty:
+        st.map(map_df.rename(columns={"latitude": "lat", "longitude": "lon"}))
 
 # -------------------------
 # MAIN
 # -------------------------
-if st.session_state.user is None:
+if st.session_state.session is None:
     login()
 else:
     tab1, tab2 = st.tabs(["Nieuw", "Dashboard"])
@@ -272,6 +288,9 @@ else:
         dashboard()
 
     if st.button("Logout"):
+        cookies["access_token"] = ""
+        cookies.save()
+
         st.session_state.user = None
         st.session_state.session = None
         st.rerun()
