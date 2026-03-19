@@ -17,7 +17,7 @@ SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ------------------------
-# GOOGLE OCR INIT
+# GOOGLE OCR
 # ------------------------
 vision_client = None
 
@@ -54,14 +54,13 @@ def apply_session():
         )
 
 # ------------------------
-# OCR SCAN
+# OCR
 # ------------------------
 def scan_bon(file):
     if not vision_client:
         return ""
 
     content = file.read()
-
     image = vision.Image(content=content)
     response = vision_client.text_detection(image=image)
 
@@ -78,21 +77,25 @@ def parse_bon(text):
     prijs = None
     brandstof = None
 
+    text_lower = text.lower()
+
     # liters
-    match_liters = re.search(r"(\d+[.,]\d+)\s*(L|liter)", text, re.IGNORECASE)
+    match_liters = re.search(r"(\d+[.,]\d+)\s*(l|liter)", text_lower)
     if match_liters:
         liters = float(match_liters.group(1).replace(",", "."))
 
-    # prijs
-    match_prijs = re.search(r"€?\s*(\d+[.,]\d+)", text)
+    # prijs (pakt eerste € bedrag)
+    match_prijs = re.search(r"€\s*(\d+[.,]\d+)", text_lower)
     if match_prijs:
         prijs = float(match_prijs.group(1).replace(",", "."))
 
     # brandstof
-    if "diesel" in text.lower():
+    if "diesel" in text_lower:
         brandstof = "diesel"
-    elif "95" in text:
+    elif "95" in text_lower:
         brandstof = "euro 95"
+    elif "98" in text_lower:
+        brandstof = "euro 98"
 
     return liters, prijs, brandstof
 
@@ -122,7 +125,7 @@ def login():
             st.error("Login mislukt")
 
 # ------------------------
-# NAV
+# NAVIGATIE
 # ------------------------
 def navigation():
     col1, col2, col3 = st.columns(3)
@@ -138,12 +141,11 @@ def navigation():
         st.rerun()
 
 # ------------------------
-# NIEUWE ENTRY
+# NIEUWE TANKBEURT
 # ------------------------
 def nieuwe_tankbeurt():
     st.subheader("Nieuwe tankbeurt")
 
-    # OCR upload
     uploaded_file = st.file_uploader("Upload bon", type=["jpg", "png"])
 
     liters = 0.0
@@ -154,18 +156,29 @@ def nieuwe_tankbeurt():
         text = scan_bon(uploaded_file)
         st.text_area("Herkende tekst", text, height=150)
 
-        liters, prijs, brandstof = parse_bon(text)
+        l, p, b = parse_bon(text)
+
+        if l:
+            liters = l
+        if p:
+            prijs = p
+        if b:
+            brandstof = b.lower().strip()
 
     datum = st.date_input("Datum", value=date.today())
-    liters = st.number_input("Liters", value=liters)
-    prijs = st.number_input("Prijs", value=prijs)
+    liters = st.number_input("Liters", value=float(liters))
+    prijs = st.number_input("Prijs (€)", value=float(prijs))
     km = st.number_input("KM", value=0.0)
 
-    brandstof = st.selectbox(
-        "Brandstof",
-        ["", "euro 95", "diesel", "euro 98", "elektrisch"],
-        index=0 if brandstof == "" else ["", "euro 95", "diesel", "euro 98", "elektrisch"].index(brandstof)
-    )
+    # veilige selectbox (FIX)
+    opties = ["", "euro 95", "diesel", "euro 98", "elektrisch"]
+
+    if brandstof in opties:
+        index = opties.index(brandstof)
+    else:
+        index = 0
+
+    brandstof = st.selectbox("Brandstof", opties, index=index)
 
     totaal = liters * prijs
     kosten_km = totaal / km if km > 0 else 0
@@ -174,19 +187,23 @@ def nieuwe_tankbeurt():
     st.write(f"Kosten per km: €{kosten_km:.2f}")
 
     if st.button("Opslaan"):
-        apply_session()
+        try:
+            apply_session()
 
-        supabase.table("tankbeurten").insert({
-            "user_id": st.session_state.user_id,
-            "datum": str(datum),
-            "liters": liters,
-            "prijs": prijs,
-            "km": km,
-            "totaal": totaal,
-            "brandstof": brandstof
-        }).execute()
+            supabase.table("tankbeurten").insert({
+                "user_id": st.session_state.user_id,
+                "datum": str(datum),
+                "liters": liters,
+                "prijs": prijs,
+                "km": km,
+                "totaal": totaal,
+                "brandstof": brandstof
+            }).execute()
 
-        st.success("Opgeslagen")
+            st.success("Opgeslagen")
+
+        except Exception as e:
+            st.error(f"Opslaan mislukt: {e}")
 
 # ------------------------
 # DASHBOARD
@@ -194,30 +211,45 @@ def nieuwe_tankbeurt():
 def dashboard():
     st.subheader("Dashboard")
 
-    apply_session()
-
-    res = supabase.table("tankbeurten").select("*").execute()
-    data = res.data
-
-    if not data:
-        st.warning("Geen data")
-        return
-
-    df = pd.DataFrame(data)
-    df_display = df.drop(columns=["id", "user_id"], errors="ignore")
-
-    st.dataframe(df_display)
-
-    st.write("Totale kosten:", df["totaal"].sum())
-
-    # DELETE
-    ids = df["id"].tolist()
-    selected = st.selectbox("Verwijder", ids)
-
-    if st.button("Delete"):
+    try:
         apply_session()
-        supabase.table("tankbeurten").delete().eq("id", selected).execute()
-        st.rerun()
+
+        res = supabase.table("tankbeurten").select("*").execute()
+        data = res.data
+
+        if not data:
+            st.warning("Geen data beschikbaar")
+            return
+
+        df = pd.DataFrame(data)
+
+        df_display = df.drop(columns=["id", "user_id"], errors="ignore")
+        st.dataframe(df_display, use_container_width=True)
+
+        totaal_kosten = df["totaal"].sum()
+        totaal_km = df["km"].sum()
+
+        st.write(f"Totale kosten: €{totaal_kosten:.2f}")
+
+        if totaal_km > 0:
+            st.write(f"Gemiddeld € per km: €{totaal_kosten / totaal_km:.2f}")
+
+        # verwijderen
+        ids = df["id"].tolist()
+        selected_id = st.selectbox("Verwijder record", ids)
+
+        if st.button("Verwijder"):
+            apply_session()
+            supabase.table("tankbeurten") \
+                .delete() \
+                .eq("id", selected_id) \
+                .execute()
+
+            st.success("Verwijderd")
+            st.rerun()
+
+    except Exception as e:
+        st.error(f"Fout bij ophalen data: {e}")
 
 # ------------------------
 # MAIN
@@ -234,3 +266,6 @@ else:
 
     elif st.session_state.page == "dashboard":
         dashboard()
+
+    else:
+        st.title("Welkom")
