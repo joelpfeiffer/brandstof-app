@@ -7,14 +7,25 @@ from google.oauth2 import service_account
 import re
 
 # -------------------------
-# CONFIG
+# UI (MOBILE FIX)
 # -------------------------
 st.set_page_config(page_title="Brandstof", layout="centered")
 
+st.markdown("""
+<style>
+button {
+    height: 60px !important;
+    font-size: 18px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# -------------------------
+# CONFIG
+# -------------------------
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
-# basis client
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------
@@ -27,7 +38,7 @@ if "session" not in st.session_state:
     st.session_state.session = None
 
 # -------------------------
-# AUTH CLIENT (FIXED)
+# AUTH CLIENT (RLS FIX)
 # -------------------------
 def get_auth_client():
     if st.session_state.session is None:
@@ -63,19 +74,36 @@ def get_vision_client():
 vision_client = get_vision_client()
 
 # -------------------------
-# PARSE BON
+# OCR PARSER (VERBETERD)
 # -------------------------
 def parse_bon(text):
     liters = None
     prijs = None
 
-    match = re.search(r'(\d+[.,]\d+)\s*L', text)
-    if match:
-        liters = float(match.group(1).replace(",", "."))
+    text = text.lower()
 
-    match = re.search(r'€\s?(\d+[.,]\d+)', text)
-    if match:
-        prijs = float(match.group(1).replace(",", "."))
+    liter_patterns = [
+        r'(\d+[.,]\d+)\s*l',
+        r'l\s*(\d+[.,]\d+)',
+        r'volume\s*(\d+[.,]\d+)',
+    ]
+
+    for pattern in liter_patterns:
+        match = re.search(pattern, text)
+        if match:
+            liters = float(match.group(1).replace(",", "."))
+            break
+
+    prijs_patterns = [
+        r'€\s?(\d+[.,]\d+)',
+        r'(\d+[.,]\d+)\s*euro',
+    ]
+
+    for pattern in prijs_patterns:
+        match = re.search(pattern, text)
+        if match:
+            prijs = float(match.group(1).replace(",", "."))
+            break
 
     return liters, prijs
 
@@ -126,6 +154,10 @@ def nieuwe_tankbeurt():
             response = vision_client.text_detection(image=image)
 
             text = response.text_annotations[0].description if response.text_annotations else ""
+
+            # DEBUG OCR TEXT
+            st.text_area("OCR tekst", text, height=150)
+
             l, p = parse_bon(text)
 
             if l: liters = l
@@ -160,7 +192,7 @@ def nieuwe_tankbeurt():
                 st.error("Geen sessie")
                 return
 
-            auth_supabase.table("tankbeurten").insert({
+            res = auth_supabase.table("tankbeurten").insert({
                 "user_id": st.session_state.user.id,
                 "datum": str(datetime.today().date()),
                 "liters": liters,
@@ -170,6 +202,9 @@ def nieuwe_tankbeurt():
                 "brandstof": brandstof,
                 "station": station
             }).execute()
+
+            # DEBUG RESPONSE
+            st.write(res)
 
             st.success("Opgeslagen")
             st.rerun()
@@ -186,7 +221,7 @@ def dashboard():
         st.error("Niet ingelogd")
         return
 
-    st.subheader("Dashboard")
+    st.subheader("Overzicht")
 
     try:
         auth_supabase = get_auth_client()
@@ -197,34 +232,33 @@ def dashboard():
             .execute().data
 
         if not data:
-            st.info("Nog geen data")
+            st.info("Nog geen tankbeurten")
             return
 
         df = pd.DataFrame(data)
         df["kosten_per_km"] = df["totaal"] / df["km"]
 
+        # STATS
+        col1, col2 = st.columns(2)
+        col1.metric("Totaal", f"€ {df['totaal'].sum():.2f}")
+        col2.metric("Gem €/km", f"€ {df['kosten_per_km'].mean():.2f}")
+
+        st.divider()
+
+        # LIST
         for _, row in df.iterrows():
-            st.markdown(f"""
-            **{row['datum']}**  
-            {row['station']} - {row['brandstof']}  
-            {row['liters']}L | €{row['totaal']:.2f}  
-            €{row['kosten_per_km']:.2f}/km
-            """)
-            st.divider()
+            with st.container():
+                st.markdown(f"""
+                **{row['datum']}**  
+                {row['station']} • {row['brandstof']}
+                """)
 
-        st.metric("Totale kosten", f"€ {df['totaal'].sum():.2f}")
+                col1, col2, col3 = st.columns(3)
+                col1.write(f"{row['liters']} L")
+                col2.write(f"€ {row['totaal']:.2f}")
+                col3.write(f"€ {row['kosten_per_km']:.2f}/km")
 
-        with st.expander("Verwijderen"):
-            delete_id = st.selectbox("Selecteer", df["id"])
-
-            if st.button("Verwijder"):
-                auth_supabase.table("tankbeurten") \
-                    .delete() \
-                    .eq("id", delete_id) \
-                    .execute()
-
-                st.success("Verwijderd")
-                st.rerun()
+                st.divider()
 
     except Exception as e:
         st.error(f"Dashboard fout: {e}")
