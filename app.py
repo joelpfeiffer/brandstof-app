@@ -25,6 +25,9 @@ if "user" not in st.session_state:
 if "session" not in st.session_state:
     st.session_state.session = None
 
+if "reset" not in st.session_state:
+    st.session_state.reset = False
+
 # -------------------------
 # AUTH CLIENT
 # -------------------------
@@ -61,7 +64,7 @@ def get_vision_client():
 vision_client = get_vision_client()
 
 # -------------------------
-# BETERE OCR PARSER
+# OCR PARSER (FIXED)
 # -------------------------
 def parse_bon(text):
     text = text.lower()
@@ -70,19 +73,38 @@ def parse_bon(text):
     numbers = [float(n.replace(",", ".")) for n in numbers]
 
     liters = None
-    prijs = None
+    prijs_per_liter = None
+    totaal = None
 
-    # liters = meestal tussen 20 en 80
     for n in numbers:
         if 10 < n < 100:
             liters = n
-            break
+        elif 1 < n < 5:
+            prijs_per_liter = n
 
-    # prijs = vaak grootste getal
     if numbers:
-        prijs = max(numbers)
+        totaal = max(numbers)
 
-    return liters, prijs
+    if liters and totaal and not prijs_per_liter:
+        prijs_per_liter = totaal / liters
+
+    return liters, prijs_per_liter
+
+# -------------------------
+# GPS
+# -------------------------
+st.components.v1.html("""
+<script>
+navigator.geolocation.getCurrentPosition(
+    (pos) => {
+        const coords = pos.coords.latitude + "," + pos.coords.longitude;
+        window.parent.postMessage({type: "streamlit:setComponentValue", value: coords}, "*");
+    }
+);
+</script>
+""", height=0)
+
+gps = st.session_state.get("gps")
 
 # -------------------------
 # LOGIN
@@ -93,7 +115,7 @@ def login():
     email = st.text_input("Email")
     password = st.text_input("Wachtwoord", type="password")
 
-    if st.button("Login", use_container_width=True):
+    if st.button("Login"):
         res = supabase.auth.sign_in_with_password({
             "email": email,
             "password": password
@@ -104,21 +126,20 @@ def login():
         st.rerun()
 
 # -------------------------
-# NIEUWE TANKBEURT
+# NIEUWE ENTRY
 # -------------------------
-def nieuwe_tankbeurt():
+def nieuwe():
 
     st.subheader("Nieuwe tankbeurt")
-
-    uploaded = st.file_uploader("Scan bon", type=["jpg", "png", "jpeg"])
 
     liters = 0.0
     prijs = 0.0
 
+    uploaded = st.file_uploader("Scan bon")
+
     if uploaded and vision_client:
         image = vision.Image(content=uploaded.read())
         response = vision_client.text_detection(image=image)
-
         text = response.text_annotations[0].description if response.text_annotations else ""
 
         st.text_area("OCR tekst", text, height=120)
@@ -130,16 +151,22 @@ def nieuwe_tankbeurt():
         if p:
             prijs = p
 
-    liters = st.number_input("Liters", value=float(liters))
-    prijs = st.number_input("Prijs per liter", value=float(prijs))
+    liters = st.number_input("Liters", value=0.0 if st.session_state.reset else liters)
+    prijs = st.number_input("Prijs per liter", value=0.0 if st.session_state.reset else prijs)
     km = st.number_input("KM", value=0.0)
 
     brandstof = st.selectbox("Brandstof", ["euro 95", "diesel", "euro 98"])
-    station = st.selectbox("Tankstation", ["Shell", "BP", "Esso", "Texaco", "Total"])
+    station = st.selectbox("Tankstation", ["Shell", "BP", "Esso", "Texaco"])
 
     totaal = liters * prijs
 
-    if st.button("Opslaan", use_container_width=True):
+    st.metric("Totaal prijs", f"€ {totaal:.2f}")
+
+    if st.button("Opslaan"):
+
+        lat, lon = None, None
+        if gps:
+            lat, lon = gps.split(",")
 
         auth = get_auth_client()
 
@@ -151,10 +178,14 @@ def nieuwe_tankbeurt():
             "km": km,
             "totaal": totaal,
             "brandstof": brandstof,
-            "station": station
+            "station": station,
+            "latitude": lat,
+            "longitude": lon
         }).execute()
 
         st.success("Opgeslagen")
+
+        st.session_state.reset = True
         st.rerun()
 
 # -------------------------
@@ -165,7 +196,6 @@ def dashboard():
     st.subheader("Dashboard")
 
     auth = get_auth_client()
-
     data = auth.table("tankbeurten").select("*").execute().data
 
     if not data:
@@ -174,36 +204,20 @@ def dashboard():
 
     df = pd.DataFrame(data)
 
-    # kolommen opschonen
-    df = df.drop(columns=["id", "user_id"], errors="ignore")
+    df = df.drop(columns=["id", "user_id", "latitude", "longitude"], errors="ignore")
 
-    # filters
-    brandstof_filter = st.multiselect("Brandstof", df["brandstof"].unique())
-    if brandstof_filter:
-        df = df[df["brandstof"].isin(brandstof_filter)]
-
-    # tabel
     st.dataframe(df, use_container_width=True)
 
-    # grafieken
     df["datum"] = pd.to_datetime(df["datum"])
     df = df.sort_values("datum")
 
-    st.subheader("Kosten per maand")
+    st.subheader("Kosten verloop")
     st.line_chart(df.set_index("datum")["totaal"])
 
-    st.subheader("Kosten per KM")
-    df["km_kosten"] = df["totaal"] / df["km"]
-    st.line_chart(df.set_index("datum")["km_kosten"])
-
-    # kaart
-    if "latitude" in df.columns and "longitude" in df.columns:
-        map_df = df.dropna(subset=["latitude", "longitude"])
+    if "latitude" in data[0]:
+        map_df = pd.DataFrame(data).dropna(subset=["latitude", "longitude"])
         if not map_df.empty:
-            st.map(map_df.rename(columns={
-                "latitude": "lat",
-                "longitude": "lon"
-            }))
+            st.map(map_df.rename(columns={"latitude": "lat", "longitude": "lon"}))
 
 # -------------------------
 # MAIN
@@ -214,7 +228,7 @@ else:
     tab1, tab2 = st.tabs(["Nieuw", "Dashboard"])
 
     with tab1:
-        nieuwe_tankbeurt()
+        nieuwe()
 
     with tab2:
         dashboard()
