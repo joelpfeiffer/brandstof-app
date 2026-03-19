@@ -8,6 +8,9 @@ import re
 
 st.set_page_config(page_title="Brandstof", layout="centered")
 
+# -------------------------
+# CONFIG
+# -------------------------
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
@@ -16,33 +19,35 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # -------------------------
 # SESSION INIT
 # -------------------------
-if "user" not in st.session_state:
-    st.session_state.user = None
+defaults = {
+    "user": None,
+    "session": None,
+    "liters": 0.0,
+    "prijs": 0.0,
+    "km": 0.0,
+    "brandstof": "euro 95",
+    "station": "Shell"
+}
 
-if "session" not in st.session_state:
-    st.session_state.session = None
+for key, value in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
 # -------------------------
-# AUTH CLIENT (SAFE)
+# AUTH CLIENT (VEILIG)
 # -------------------------
 def get_auth_client():
     session = st.session_state.session
 
-    if session is None:
-        st.error("❌ Geen session (niet ingelogd)")
-        return None
-
-    if not hasattr(session, "access_token"):
-        st.error("❌ Geen access token")
+    if session is None or not hasattr(session, "access_token"):
+        st.error("Niet ingelogd / session fout")
         return None
 
     return create_client(
         SUPABASE_URL,
         SUPABASE_KEY,
         options=ClientOptions(
-            headers={
-                "Authorization": f"Bearer {session.access_token}"
-            }
+            headers={"Authorization": f"Bearer {session.access_token}"}
         )
     )
 
@@ -59,13 +64,14 @@ def get_vision_client():
             "token_uri": "https://oauth2.googleapis.com/token",
         })
         return vision.ImageAnnotatorClient(credentials=credentials)
-    except:
+    except Exception as e:
+        st.warning(f"OCR niet actief: {e}")
         return None
 
 vision_client = get_vision_client()
 
 # -------------------------
-# OCR PARSER
+# OCR PARSER (GOED)
 # -------------------------
 def parse_bon(text):
     text = text.lower()
@@ -88,10 +94,26 @@ def parse_bon(text):
     return liters, prijs
 
 # -------------------------
+# GPS
+# -------------------------
+st.components.v1.html("""
+<script>
+navigator.geolocation.getCurrentPosition(
+    (pos) => {
+        const coords = pos.coords.latitude + "," + pos.coords.longitude;
+        window.parent.postMessage({type: "streamlit:setComponentValue", value: coords}, "*");
+    }
+);
+</script>
+""", height=0)
+
+gps = st.session_state.get("gps")
+
+# -------------------------
 # LOGIN
 # -------------------------
 def login():
-    st.title("Login")
+    st.title("Brandstof App")
 
     email = st.text_input("Email")
     password = st.text_input("Wachtwoord", type="password")
@@ -119,12 +141,30 @@ def nieuwe():
 
     st.subheader("Nieuwe tankbeurt")
 
-    liters = st.number_input("Liters", value=0.0)
-    prijs = st.number_input("Prijs per liter", value=0.0)
-    km = st.number_input("KM", value=0.0)
+    uploaded = st.file_uploader("Upload bon", type=["jpg", "png", "jpeg"])
 
-    totaal = liters * prijs
+    if uploaded and vision_client:
+        image = vision.Image(content=uploaded.read())
+        response = vision_client.text_detection(image=image)
+        text = response.text_annotations[0].description if response.text_annotations else ""
 
+        st.text_area("OCR tekst", text, height=120)
+
+        l, p = parse_bon(text)
+
+        if l:
+            st.session_state.liters = l
+        if p:
+            st.session_state.prijs = p
+
+    st.number_input("Liters", key="liters")
+    st.number_input("Prijs per liter", key="prijs")
+    st.number_input("KM", key="km")
+
+    st.selectbox("Brandstof", ["euro 95", "diesel", "euro 98"], key="brandstof")
+    st.selectbox("Tankstation", ["Shell", "BP", "Esso", "Texaco"], key="station")
+
+    totaal = st.session_state.liters * st.session_state.prijs
     st.metric("Totaal", f"€ {totaal:.2f}")
 
     if st.button("Opslaan"):
@@ -134,21 +174,37 @@ def nieuwe():
             return
 
         try:
+            lat, lon = None, None
+            if gps:
+                lat, lon = gps.split(",")
+
             res = auth.table("tankbeurten").insert({
                 "user_id": st.session_state.user.id,
                 "datum": str(datetime.today().date()),
-                "liters": liters,
-                "prijs": prijs,
-                "km": km,
-                "totaal": totaal
+                "liters": st.session_state.liters,
+                "prijs": st.session_state.prijs,
+                "km": st.session_state.km,
+                "totaal": totaal,
+                "brandstof": st.session_state.brandstof,
+                "station": st.session_state.station,
+                "latitude": lat,
+                "longitude": lon
             }).execute()
 
-            st.write(res)  # 🔥 debug
+            st.write(res)  # DEBUG
             st.success("Opgeslagen")
+
+            # RESET
+            st.session_state.liters = 0.0
+            st.session_state.prijs = 0.0
+            st.session_state.km = 0.0
+            st.session_state.brandstof = "euro 95"
+            st.session_state.station = "Shell"
+
             st.rerun()
 
         except Exception as e:
-            st.error(f"Insert fout: {e}")
+            st.error(f"Opslaan fout: {e}")
 
 # -------------------------
 # DASHBOARD
@@ -163,23 +219,31 @@ def dashboard():
 
     try:
         res = auth.table("tankbeurten").select("*").execute()
-
-        st.write(res)  # 🔥 debug
+        st.write(res)  # DEBUG
 
         data = res.data
 
         if not data:
-            st.warning("Geen data gevonden")
+            st.warning("Geen data")
             return
 
         df = pd.DataFrame(data)
 
-        df = df.drop(columns=["id", "user_id"], errors="ignore")
+        df = df.drop(columns=["id", "user_id", "latitude", "longitude"], errors="ignore")
 
-        st.dataframe(df)
+        st.dataframe(df, use_container_width=True)
+
+        df["datum"] = pd.to_datetime(df["datum"])
+        df = df.sort_values("datum")
+
+        st.line_chart(df.set_index("datum")["totaal"])
+
+        map_df = pd.DataFrame(data).dropna(subset=["latitude", "longitude"])
+        if not map_df.empty:
+            st.map(map_df.rename(columns={"latitude": "lat", "longitude": "lon"}))
 
     except Exception as e:
-        st.error(f"Select fout: {e}")
+        st.error(f"Dashboard fout: {e}")
 
 # -------------------------
 # MAIN
