@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from datetime import date
 from supabase import create_client
-from supabase.lib.client_options import ClientOptions
 
 # ------------------------
 # CONFIG
@@ -11,25 +10,6 @@ SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# ------------------------
-# AUTH CLIENT (RLS FIX)
-# ------------------------
-def get_auth_client():
-    if "session" not in st.session_state or st.session_state.session is None:
-        return None
-
-    access_token = st.session_state.session.session.access_token
-
-    return create_client(
-        SUPABASE_URL,
-        SUPABASE_KEY,
-        options=ClientOptions(
-            headers={
-                "Authorization": f"Bearer {access_token}"
-            }
-        )
-    )
 
 # ------------------------
 # SESSION INIT
@@ -42,6 +22,17 @@ if "user_id" not in st.session_state:
 
 if "page" not in st.session_state:
     st.session_state.page = "login"
+
+# ------------------------
+# AUTH HEADERS (RLS FIX)
+# ------------------------
+def get_headers():
+    if "session" not in st.session_state or st.session_state.session is None:
+        return None
+
+    return {
+        "Authorization": f"Bearer {st.session_state.session.session.access_token}"
+    }
 
 # ------------------------
 # LOGIN
@@ -113,25 +104,27 @@ def nieuwe_tankbeurt():
     st.write(f"Kosten per km: €{kosten_per_km:.2f}")
 
     if st.button("Opslaan"):
-        auth_supabase = get_auth_client()
+        headers = get_headers()
 
-        if not auth_supabase:
+        if not headers:
             st.error("Niet ingelogd")
             return
 
         try:
-            auth_supabase.table("tankbeurten").insert({
-                "user_id": st.session_state.user_id,
-                "datum": str(datum),
-                "liters": liters,
-                "prijs": prijs,
-                "km": km,
-                "totaal": totaal
-            }).execute()
+            supabase.table("tankbeurten") \
+                .insert({
+                    "user_id": st.session_state.user_id,
+                    "datum": str(datum),
+                    "liters": liters,
+                    "prijs": prijs,
+                    "km": km,
+                    "totaal": totaal
+                }) \
+                .execute(headers=headers)
 
             st.success("Opgeslagen")
 
-        except Exception as e:
+        except Exception:
             st.error("Opslaan mislukt (RLS?)")
 
 # ------------------------
@@ -140,14 +133,17 @@ def nieuwe_tankbeurt():
 def dashboard():
     st.subheader("Dashboard")
 
-    auth_supabase = get_auth_client()
+    headers = get_headers()
 
-    if not auth_supabase:
+    if not headers:
         st.error("Niet ingelogd")
         return
 
     try:
-        res = auth_supabase.table("tankbeurten").select("*").execute()
+        res = supabase.table("tankbeurten") \
+            .select("*") \
+            .execute(headers=headers)
+
         data = res.data
 
         if not data:
@@ -179,15 +175,15 @@ def dashboard():
         selected_id = st.selectbox("Selecteer record", ids)
 
         if st.button("Verwijder"):
-            auth_supabase.table("tankbeurten") \
+            supabase.table("tankbeurten") \
                 .delete() \
                 .eq("id", selected_id) \
-                .execute()
+                .execute(headers=headers)
 
             st.success("Verwijderd")
             st.rerun()
 
-    except Exception as e:
+    except Exception:
         st.error("Fout bij ophalen data")
 
 # ------------------------
