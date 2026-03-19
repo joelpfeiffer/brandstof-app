@@ -1,7 +1,8 @@
 import streamlit as st
-from supabase import create_client
 import pandas as pd
 from datetime import date
+from supabase import create_client
+from supabase.lib.client_options import ClientOptions
 
 # ------------------------
 # CONFIG
@@ -9,27 +10,26 @@ from datetime import date
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
-# BASE CLIENT (voor login)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-
 # ------------------------
-# AUTH CLIENT (BELANGRIJK!)
+# AUTH CLIENT (RLS FIX)
 # ------------------------
 def get_auth_client():
-    if "session" not in st.session_state:
+    if "session" not in st.session_state or st.session_state.session is None:
         return None
+
+    access_token = st.session_state.session.session.access_token
 
     return create_client(
         SUPABASE_URL,
         SUPABASE_KEY,
-        options={
-            "headers": {
-                "Authorization": f"Bearer {st.session_state.session.session.access_token}"
+        options=ClientOptions(
+            headers={
+                "Authorization": f"Bearer {access_token}"
             }
-        },
+        )
     )
-
 
 # ------------------------
 # SESSION INIT
@@ -42,7 +42,6 @@ if "user_id" not in st.session_state:
 
 if "page" not in st.session_state:
     st.session_state.page = "login"
-
 
 # ------------------------
 # LOGIN
@@ -66,9 +65,8 @@ def login():
 
             st.rerun()
 
-        except Exception as e:
+        except Exception:
             st.error("Login mislukt")
-
 
 # ------------------------
 # LOGOUT
@@ -78,7 +76,6 @@ def logout():
     st.session_state.user_id = None
     st.session_state.page = "login"
     st.rerun()
-
 
 # ------------------------
 # NAVIGATIE
@@ -97,7 +94,6 @@ def navigation():
     with col3:
         if st.button("Logout"):
             logout()
-
 
 # ------------------------
 # NIEUWE TANKBEURT
@@ -138,7 +134,6 @@ def nieuwe_tankbeurt():
         except Exception as e:
             st.error("Opslaan mislukt (RLS?)")
 
-
 # ------------------------
 # DASHBOARD
 # ------------------------
@@ -161,10 +156,10 @@ def dashboard():
 
         df = pd.DataFrame(data)
 
-        # Verwijder interne kolommen
-        df = df.drop(columns=["id", "user_id"], errors="ignore")
+        # Verberg interne kolommen
+        df_display = df.drop(columns=["id", "user_id"], errors="ignore")
 
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df_display, use_container_width=True)
 
         # Analyse
         totaal_kosten = df["totaal"].sum()
@@ -175,20 +170,25 @@ def dashboard():
         if totaal_km > 0:
             st.write(f"Gemiddeld € per km: €{totaal_kosten / totaal_km:.2f}")
 
+        # ------------------------
         # DELETE
+        # ------------------------
         st.subheader("Verwijderen")
 
-        ids = [row["id"] for row in data]
+        ids = df["id"].tolist()
         selected_id = st.selectbox("Selecteer record", ids)
 
         if st.button("Verwijder"):
-            auth_supabase.table("tankbeurten").delete().eq("id", selected_id).execute()
+            auth_supabase.table("tankbeurten") \
+                .delete() \
+                .eq("id", selected_id) \
+                .execute()
+
             st.success("Verwijderd")
             st.rerun()
 
     except Exception as e:
         st.error("Fout bij ophalen data")
-
 
 # ------------------------
 # MAIN
