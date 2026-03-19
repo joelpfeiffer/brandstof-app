@@ -34,13 +34,12 @@ for key, value in defaults.items():
         st.session_state[key] = value
 
 # -------------------------
-# AUTH CLIENT (VEILIG)
+# AUTH CLIENT
 # -------------------------
 def get_auth_client():
     session = st.session_state.session
-
     if session is None or not hasattr(session, "access_token"):
-        st.error("Niet ingelogd / session fout")
+        st.error("Niet ingelogd")
         return None
 
     return create_client(
@@ -64,18 +63,16 @@ def get_vision_client():
             "token_uri": "https://oauth2.googleapis.com/token",
         })
         return vision.ImageAnnotatorClient(credentials=credentials)
-    except Exception as e:
-        st.warning(f"OCR niet actief: {e}")
+    except:
         return None
 
 vision_client = get_vision_client()
 
 # -------------------------
-# OCR PARSER (GOED)
+# OCR PARSER
 # -------------------------
 def parse_bon(text):
     text = text.lower()
-
     numbers = re.findall(r'\d+[.,]\d+', text)
     numbers = [float(n.replace(",", ".")) for n in numbers]
 
@@ -127,15 +124,13 @@ def login():
 
             st.session_state.user = res.user
             st.session_state.session = res.session
-
-            st.success("Ingelogd")
             st.rerun()
 
         except Exception as e:
             st.error(e)
 
 # -------------------------
-# NIEUWE ENTRY
+# NIEUWE TANKBEURT
 # -------------------------
 def nieuwe():
 
@@ -165,7 +160,7 @@ def nieuwe():
     st.selectbox("Tankstation", ["Shell", "BP", "Esso", "Texaco"], key="station")
 
     totaal = st.session_state.liters * st.session_state.prijs
-    st.metric("Totaal", f"€ {totaal:.2f}")
+    st.metric("Totaal prijs", f"€ {totaal:.2f}")
 
     if st.button("Opslaan"):
 
@@ -178,7 +173,7 @@ def nieuwe():
             if gps:
                 lat, lon = gps.split(",")
 
-            res = auth.table("tankbeurten").insert({
+            auth.table("tankbeurten").insert({
                 "user_id": st.session_state.user.id,
                 "datum": str(datetime.today().date()),
                 "liters": st.session_state.liters,
@@ -191,7 +186,6 @@ def nieuwe():
                 "longitude": lon
             }).execute()
 
-            st.write(res)  # DEBUG
             st.success("Opgeslagen")
 
             # RESET
@@ -218,13 +212,10 @@ def dashboard():
         return
 
     try:
-        res = auth.table("tankbeurten").select("*").execute()
-        st.write(res)  # DEBUG
-
-        data = res.data
+        data = auth.table("tankbeurten").select("*").execute().data
 
         if not data:
-            st.warning("Geen data")
+            st.info("Geen data")
             return
 
         df = pd.DataFrame(data)
@@ -236,6 +227,7 @@ def dashboard():
         df["datum"] = pd.to_datetime(df["datum"])
         df = df.sort_values("datum")
 
+        st.subheader("Kosten verloop")
         st.line_chart(df.set_index("datum")["totaal"])
 
         map_df = pd.DataFrame(data).dropna(subset=["latitude", "longitude"])
