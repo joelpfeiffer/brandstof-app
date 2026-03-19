@@ -6,226 +6,197 @@ from google.cloud import vision
 from google.oauth2 import service_account
 import re
 
-# -----------------------------
+# -------------------------
 # CONFIG
-# -----------------------------
-st.set_page_config(page_title="Brandstof App", layout="wide")
+# -------------------------
+st.set_page_config(page_title="Brandstof", layout="centered")
 
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# -----------------------------
-# OCR SETUP (FIXED)
-# -----------------------------
-vision_client = None
+# -------------------------
+# OCR CLIENT (CACHED)
+# -------------------------
+@st.cache_resource
+def get_vision_client():
+    try:
+        credentials = service_account.Credentials.from_service_account_info({
+            "type": "service_account",
+            "project_id": st.secrets["GOOGLE_PROJECT_ID"],
+            "private_key": st.secrets["GOOGLE_PRIVATE_KEY"].replace("\\n", "\n"),
+            "client_email": st.secrets["GOOGLE_CLIENT_EMAIL"],
+            "token_uri": "https://oauth2.googleapis.com/token",
+        })
+        return vision.ImageAnnotatorClient(credentials=credentials)
+    except:
+        return None
 
-try:
-    credentials = service_account.Credentials.from_service_account_info({
-        "type": "service_account",
-        "project_id": st.secrets["GOOGLE_PROJECT_ID"],
-        "private_key": st.secrets["GOOGLE_PRIVATE_KEY"].replace("\\n", "\n"),
-        "client_email": st.secrets["GOOGLE_CLIENT_EMAIL"],
-        "token_uri": "https://oauth2.googleapis.com/token",
-    })
+vision_client = get_vision_client()
 
-    vision_client = vision.ImageAnnotatorClient(credentials=credentials)
+# -------------------------
+# CACHE DATA
+# -------------------------
+@st.cache_data(ttl=10)
+def load_data(user_id):
+    return supabase.table("tankbeurten") \
+        .select("id, datum, liters, prijs, km, totaal, brandstof, station") \
+        .eq("user_id", user_id) \
+        .order("datum", desc=True) \
+        .execute().data
 
-except Exception as e:
-    st.warning("OCR niet actief")
-
-# -----------------------------
-# HELPER: OCR PARSING
-# -----------------------------
+# -------------------------
+# PARSING
+# -------------------------
 def parse_bon(text):
     liters = None
     prijs = None
 
-    # liters
     match = re.search(r'(\d+[.,]\d+)\s*L', text)
     if match:
         liters = float(match.group(1).replace(",", "."))
 
-    # prijs
     match = re.search(r'€\s?(\d+[.,]\d+)', text)
     if match:
         prijs = float(match.group(1).replace(",", "."))
 
     return liters, prijs
 
-# -----------------------------
+# -------------------------
 # LOGIN
-# -----------------------------
+# -------------------------
 def login():
     st.title("Brandstof App")
 
     email = st.text_input("Email")
     password = st.text_input("Wachtwoord", type="password")
 
-    if st.button("Login"):
+    if st.button("Login", use_container_width=True):
         try:
             res = supabase.auth.sign_in_with_password({
                 "email": email,
                 "password": password
             })
-            st.session_state["user"] = res.user
+            st.session_state.user = res.user
             st.rerun()
         except:
             st.error("Login mislukt")
 
-# -----------------------------
-# LOGOUT
-# -----------------------------
-def logout():
-    st.session_state.clear()
-    st.rerun()
-
-# -----------------------------
-# NIEUWE TANKBEURT
-# -----------------------------
+# -------------------------
+# NIEUWE ENTRY
+# -------------------------
 def nieuwe_tankbeurt():
 
-    st.header("Nieuwe tankbeurt")
+    st.subheader("Nieuwe tankbeurt")
 
-    uploaded = st.file_uploader("Upload bon", type=["jpg", "png", "jpeg"])
+    uploaded = st.file_uploader("Scan bon", type=["jpg", "png", "jpeg"])
 
-    liters = st.number_input("Liters", value=0.0)
-    prijs = st.number_input("Prijs per liter", value=0.0)
-    km = st.number_input("Kilometerstand", value=0.0)
+    liters = 0.0
+    prijs = 0.0
 
-    brandstof = st.selectbox("Brandstof", ["", "euro 95", "diesel", "euro 98", "elektrisch"])
-
-    station = st.selectbox("Tankstation", [
-        "", "Shell", "BP", "Total", "Texaco", "Esso",
-        "AVIA", "Berkman", "Pin&Go"
-    ])
-
-    lat = None
-    lon = None
-    adres = None
-
-    # OCR
     if uploaded and vision_client:
         image = vision.Image(content=uploaded.read())
         response = vision_client.text_detection(image=image)
-        text = response.text_annotations[0].description if response.text_annotations else ""
 
+        text = response.text_annotations[0].description if response.text_annotations else ""
         l, p = parse_bon(text)
 
-        if l:
-            liters = l
-        if p:
-            prijs = p
+        if l: liters = l
+        if p: prijs = p
 
-        st.success("OCR toegepast")
+        st.success("Bon gescand")
 
-    if st.button("Opslaan"):
-        totaal = liters * prijs
-        cost_per_km = totaal / km if km > 0 else 0
+    liters = st.number_input("Liters", value=float(liters))
+    prijs = st.number_input("Prijs per liter", value=float(prijs))
+    km = st.number_input("KM", value=0.0)
 
+    brandstof = st.selectbox("Brandstof", ["euro 95", "diesel", "euro 98"])
+    station = st.selectbox("Tankstation", [
+        "Shell", "BP", "Esso", "Texaco", "Total",
+        "Tango", "AVIA", "Berkman", "Pin&Go"
+    ])
+
+    totaal = liters * prijs
+    kosten_km = totaal / km if km > 0 else 0
+
+    st.metric("Totaal", f"€ {totaal:.2f}")
+    st.metric("€/km", f"€ {kosten_km:.2f}")
+
+    if st.button("Opslaan", use_container_width=True):
         try:
             supabase.table("tankbeurten").insert({
-                "user_id": st.session_state["user"].id,
+                "user_id": st.session_state.user.id,
                 "datum": str(datetime.today().date()),
                 "liters": liters,
                 "prijs": prijs,
                 "km": km,
                 "totaal": totaal,
                 "brandstof": brandstof,
-                "station": station,
-                "latitude": lat,
-                "longitude": lon,
-                "adres": adres
+                "station": station
             }).execute()
 
-            st.success("Opgeslagen!")
+            st.cache_data.clear()
+            st.success("Opgeslagen")
             st.rerun()
 
-        except Exception as e:
+        except:
             st.error("Opslaan mislukt")
 
-# -----------------------------
+# -------------------------
 # DASHBOARD
-# -----------------------------
+# -------------------------
 def dashboard():
 
-    st.header("Dashboard")
+    st.subheader("Dashboard")
 
-    user_id = st.session_state["user"].id
+    data = load_data(st.session_state.user.id)
 
-    try:
-        data = supabase.table("tankbeurten") \
-            .select("*") \
-            .eq("user_id", user_id) \
-            .execute()
+    if not data:
+        st.info("Nog geen data")
+        return
 
-        rows = data.data
+    df = pd.DataFrame(data)
 
-        if not rows:
-            st.warning("Geen data")
-            return
+    df["kosten_per_km"] = df["totaal"] / df["km"]
 
-        df = pd.DataFrame(rows)
+    # mobiele weergave
+    for _, row in df.iterrows():
+        with st.container():
+            st.markdown(f"""
+            **{row['datum']}**  
+            {row['station']} - {row['brandstof']}  
+            {row['liters']} L | €{row['totaal']:.2f}  
+            €{row['kosten_per_km']:.2f}/km
+            """)
+            st.divider()
 
-        # kosten per km
-        df["kosten_per_km"] = df["totaal"] / df["km"]
+    st.metric("Totale kosten", f"€ {df['totaal'].sum():.2f}")
 
-        # nette tabel
-        st.dataframe(df[[
-            "datum", "liters", "prijs", "km",
-            "totaal", "kosten_per_km", "brandstof", "station"
-        ]])
-
-        st.metric("Totale kosten", round(df["totaal"].sum(), 2))
-
-        # verwijderen
-        st.subheader("Verwijderen")
-
-        delete_id = st.selectbox(
-            "Selecteer record",
-            df["id"]
-        )
-
+    # verwijderen
+    with st.expander("Verwijderen"):
+        delete_id = st.selectbox("Selecteer", df["id"])
         if st.button("Verwijder"):
             supabase.table("tankbeurten").delete().eq("id", delete_id).execute()
-            st.success("Verwijderd")
+            st.cache_data.clear()
             st.rerun()
 
-        # kaart
-        if "latitude" in df and df["latitude"].notna().any():
-            st.subheader("Kaart")
-            st.map(df.rename(columns={
-                "latitude": "lat",
-                "longitude": "lon"
-            }))
-
-    except:
-        st.error("Fout bij ophalen data")
-
-# -----------------------------
+# -------------------------
 # MAIN
-# -----------------------------
+# -------------------------
 if "user" not in st.session_state:
     login()
 else:
-    st.success(f"Ingelogd als: {st.session_state['user'].email}")
+    st.title("Brandstof")
 
-    col1, col2, col3 = st.columns(3)
+    tab1, tab2 = st.tabs(["➕ Nieuw", "📊 Overzicht"])
 
-    if col1.button("Nieuwe tankbeurt"):
-        st.session_state["page"] = "new"
-
-    if col2.button("Dashboard"):
-        st.session_state["page"] = "dashboard"
-
-    if col3.button("Logout"):
-        logout()
-
-    if "page" not in st.session_state:
-        st.session_state["page"] = "dashboard"
-
-    if st.session_state["page"] == "new":
+    with tab1:
         nieuwe_tankbeurt()
-    else:
+
+    with tab2:
         dashboard()
+
+    if st.button("Logout"):
+        st.session_state.clear()
+        st.rerun()
