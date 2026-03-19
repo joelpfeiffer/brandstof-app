@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-from supabase import create_client
+from supabase import create_client, ClientOptions
 from google.cloud import vision
 from google.oauth2 import service_account
 import re
@@ -14,10 +14,11 @@ st.set_page_config(page_title="Brandstof", layout="centered")
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
+# basis client
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------
-# SESSION STATE
+# SESSION
 # -------------------------
 if "user" not in st.session_state:
     st.session_state.user = None
@@ -26,7 +27,7 @@ if "session" not in st.session_state:
     st.session_state.session = None
 
 # -------------------------
-# AUTH CLIENT (RLS FIX)
+# AUTH CLIENT (FIXED)
 # -------------------------
 def get_auth_client():
     if st.session_state.session is None:
@@ -35,15 +36,15 @@ def get_auth_client():
     return create_client(
         SUPABASE_URL,
         SUPABASE_KEY,
-        options={
-            "headers": {
+        options=ClientOptions(
+            headers={
                 "Authorization": f"Bearer {st.session_state.session.access_token}"
             }
-        }
+        )
     )
 
 # -------------------------
-# OCR CLIENT (GEEN CACHE BUG)
+# OCR CLIENT
 # -------------------------
 def get_vision_client():
     try:
