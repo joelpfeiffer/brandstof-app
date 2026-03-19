@@ -6,19 +6,7 @@ from google.cloud import vision
 from google.oauth2 import service_account
 import re
 
-# -------------------------
-# UI (MOBILE FIX)
-# -------------------------
 st.set_page_config(page_title="Brandstof", layout="centered")
-
-st.markdown("""
-<style>
-button {
-    height: 60px !important;
-    font-size: 18px !important;
-}
-</style>
-""", unsafe_allow_html=True)
 
 # -------------------------
 # CONFIG
@@ -38,7 +26,7 @@ if "session" not in st.session_state:
     st.session_state.session = None
 
 # -------------------------
-# AUTH CLIENT (RLS FIX)
+# AUTH CLIENT
 # -------------------------
 def get_auth_client():
     if st.session_state.session is None:
@@ -67,43 +55,32 @@ def get_vision_client():
             "token_uri": "https://oauth2.googleapis.com/token",
         })
         return vision.ImageAnnotatorClient(credentials=credentials)
-    except Exception as e:
-        st.warning(f"OCR niet actief: {e}")
+    except:
         return None
 
 vision_client = get_vision_client()
 
 # -------------------------
-# OCR PARSER (VERBETERD)
+# BETERE OCR PARSER
 # -------------------------
 def parse_bon(text):
+    text = text.lower()
+
+    numbers = re.findall(r'\d+[.,]\d+', text)
+    numbers = [float(n.replace(",", ".")) for n in numbers]
+
     liters = None
     prijs = None
 
-    text = text.lower()
-
-    liter_patterns = [
-        r'(\d+[.,]\d+)\s*l',
-        r'l\s*(\d+[.,]\d+)',
-        r'volume\s*(\d+[.,]\d+)',
-    ]
-
-    for pattern in liter_patterns:
-        match = re.search(pattern, text)
-        if match:
-            liters = float(match.group(1).replace(",", "."))
+    # liters = meestal tussen 20 en 80
+    for n in numbers:
+        if 10 < n < 100:
+            liters = n
             break
 
-    prijs_patterns = [
-        r'€\s?(\d+[.,]\d+)',
-        r'(\d+[.,]\d+)\s*euro',
-    ]
-
-    for pattern in prijs_patterns:
-        match = re.search(pattern, text)
-        if match:
-            prijs = float(match.group(1).replace(",", "."))
-            break
+    # prijs = vaak grootste getal
+    if numbers:
+        prijs = max(numbers)
 
     return liters, prijs
 
@@ -117,29 +94,19 @@ def login():
     password = st.text_input("Wachtwoord", type="password")
 
     if st.button("Login", use_container_width=True):
-        try:
-            res = supabase.auth.sign_in_with_password({
-                "email": email,
-                "password": password
-            })
+        res = supabase.auth.sign_in_with_password({
+            "email": email,
+            "password": password
+        })
 
-            st.session_state.user = res.user
-            st.session_state.session = res.session
-
-            st.success("Ingelogd")
-            st.rerun()
-
-        except Exception as e:
-            st.error(f"Login fout: {e}")
+        st.session_state.user = res.user
+        st.session_state.session = res.session
+        st.rerun()
 
 # -------------------------
 # NIEUWE TANKBEURT
 # -------------------------
 def nieuwe_tankbeurt():
-
-    if st.session_state.session is None:
-        st.error("Niet ingelogd")
-        return
 
     st.subheader("Nieuwe tankbeurt")
 
@@ -149,119 +116,94 @@ def nieuwe_tankbeurt():
     prijs = 0.0
 
     if uploaded and vision_client:
-        try:
-            image = vision.Image(content=uploaded.read())
-            response = vision_client.text_detection(image=image)
+        image = vision.Image(content=uploaded.read())
+        response = vision_client.text_detection(image=image)
 
-            text = response.text_annotations[0].description if response.text_annotations else ""
+        text = response.text_annotations[0].description if response.text_annotations else ""
 
-            # DEBUG OCR TEXT
-            st.text_area("OCR tekst", text, height=150)
+        st.text_area("OCR tekst", text, height=120)
 
-            l, p = parse_bon(text)
+        l, p = parse_bon(text)
 
-            if l: liters = l
-            if p: prijs = p
-
-            st.success("OCR toegepast")
-
-        except Exception as e:
-            st.warning(f"OCR mislukt: {e}")
+        if l:
+            liters = l
+        if p:
+            prijs = p
 
     liters = st.number_input("Liters", value=float(liters))
     prijs = st.number_input("Prijs per liter", value=float(prijs))
     km = st.number_input("KM", value=0.0)
 
     brandstof = st.selectbox("Brandstof", ["euro 95", "diesel", "euro 98"])
-    station = st.selectbox("Tankstation", [
-        "Shell", "BP", "Esso", "Texaco", "Total",
-        "Tango", "AVIA", "Berkman", "Pin&Go"
-    ])
+    station = st.selectbox("Tankstation", ["Shell", "BP", "Esso", "Texaco", "Total"])
 
     totaal = liters * prijs
-    kosten_km = totaal / km if km > 0 else 0
-
-    st.metric("Totaal", f"€ {totaal:.2f}")
-    st.metric("€/km", f"€ {kosten_km:.2f}")
 
     if st.button("Opslaan", use_container_width=True):
-        try:
-            auth_supabase = get_auth_client()
 
-            if auth_supabase is None:
-                st.error("Geen sessie")
-                return
+        auth = get_auth_client()
 
-            res = auth_supabase.table("tankbeurten").insert({
-                "user_id": st.session_state.user.id,
-                "datum": str(datetime.today().date()),
-                "liters": liters,
-                "prijs": prijs,
-                "km": km,
-                "totaal": totaal,
-                "brandstof": brandstof,
-                "station": station
-            }).execute()
+        res = auth.table("tankbeurten").insert({
+            "user_id": st.session_state.user.id,
+            "datum": str(datetime.today().date()),
+            "liters": liters,
+            "prijs": prijs,
+            "km": km,
+            "totaal": totaal,
+            "brandstof": brandstof,
+            "station": station
+        }).execute()
 
-            # DEBUG RESPONSE
-            st.write(res)
-
-            st.success("Opgeslagen")
-            st.rerun()
-
-        except Exception as e:
-            st.error(f"Opslaan mislukt: {e}")
+        st.success("Opgeslagen")
+        st.rerun()
 
 # -------------------------
 # DASHBOARD
 # -------------------------
 def dashboard():
 
-    if st.session_state.session is None:
-        st.error("Niet ingelogd")
+    st.subheader("Dashboard")
+
+    auth = get_auth_client()
+
+    data = auth.table("tankbeurten").select("*").execute().data
+
+    if not data:
+        st.info("Geen data")
         return
 
-    st.subheader("Overzicht")
+    df = pd.DataFrame(data)
 
-    try:
-        auth_supabase = get_auth_client()
+    # kolommen opschonen
+    df = df.drop(columns=["id", "user_id"], errors="ignore")
 
-        data = auth_supabase.table("tankbeurten") \
-            .select("*") \
-            .order("datum", desc=True) \
-            .execute().data
+    # filters
+    brandstof_filter = st.multiselect("Brandstof", df["brandstof"].unique())
+    if brandstof_filter:
+        df = df[df["brandstof"].isin(brandstof_filter)]
 
-        if not data:
-            st.info("Nog geen tankbeurten")
-            return
+    # tabel
+    st.dataframe(df, use_container_width=True)
 
-        df = pd.DataFrame(data)
-        df["kosten_per_km"] = df["totaal"] / df["km"]
+    # grafieken
+    df["datum"] = pd.to_datetime(df["datum"])
+    df = df.sort_values("datum")
 
-        # STATS
-        col1, col2 = st.columns(2)
-        col1.metric("Totaal", f"€ {df['totaal'].sum():.2f}")
-        col2.metric("Gem €/km", f"€ {df['kosten_per_km'].mean():.2f}")
+    st.subheader("Kosten per maand")
+    st.line_chart(df.set_index("datum")["totaal"])
 
-        st.divider()
+    st.subheader("Kosten per KM")
+    df["km_kosten"] = df["totaal"] / df["km"]
+    st.line_chart(df.set_index("datum")["km_kosten"])
 
-        # LIST
-        for _, row in df.iterrows():
-            with st.container():
-                st.markdown(f"""
-                **{row['datum']}**  
-                {row['station']} • {row['brandstof']}
-                """)
-
-                col1, col2, col3 = st.columns(3)
-                col1.write(f"{row['liters']} L")
-                col2.write(f"€ {row['totaal']:.2f}")
-                col3.write(f"€ {row['kosten_per_km']:.2f}/km")
-
-                st.divider()
-
-    except Exception as e:
-        st.error(f"Dashboard fout: {e}")
+    # kaart
+    if "latitude" in df.columns and "longitude" in df.columns:
+        map_df = df.dropna(subset=["latitude", "longitude"])
+        if not map_df.empty:
+            st.map(map_df.rename(columns={
+                "latitude": "lat",
+                "longitude": "lon"
+            }))
 
 # -------------------------
 # MAIN
@@ -269,9 +211,7 @@ def dashboard():
 if st.session_state.user is None:
     login()
 else:
-    st.title("Brandstof")
-
-    tab1, tab2 = st.tabs(["Nieuw", "Overzicht"])
+    tab1, tab2 = st.tabs(["Nieuw", "Dashboard"])
 
     with tab1:
         nieuwe_tankbeurt()
