@@ -17,6 +17,12 @@ SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------
+# SESSION FIX
+# -------------------------
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+# -------------------------
 # OCR CLIENT (CACHED)
 # -------------------------
 @st.cache_resource
@@ -30,7 +36,7 @@ def get_vision_client():
             "token_uri": "https://oauth2.googleapis.com/token",
         })
         return vision.ImageAnnotatorClient(credentials=credentials)
-    except:
+    except Exception as e:
         return None
 
 vision_client = get_vision_client()
@@ -78,10 +84,16 @@ def login():
                 "email": email,
                 "password": password
             })
-            st.session_state.user = res.user
-            st.rerun()
-        except:
-            st.error("Login mislukt")
+
+            if res.user:
+                st.session_state.user = res.user
+                st.success("Ingelogd")
+                st.rerun()
+            else:
+                st.error("Login mislukt")
+
+        except Exception as e:
+            st.error(f"Login fout: {e}")
 
 # -------------------------
 # NIEUWE ENTRY
@@ -96,16 +108,20 @@ def nieuwe_tankbeurt():
     prijs = 0.0
 
     if uploaded and vision_client:
-        image = vision.Image(content=uploaded.read())
-        response = vision_client.text_detection(image=image)
+        try:
+            image = vision.Image(content=uploaded.read())
+            response = vision_client.text_detection(image=image)
 
-        text = response.text_annotations[0].description if response.text_annotations else ""
-        l, p = parse_bon(text)
+            text = response.text_annotations[0].description if response.text_annotations else ""
+            l, p = parse_bon(text)
 
-        if l: liters = l
-        if p: prijs = p
+            if l: liters = l
+            if p: prijs = p
 
-        st.success("Bon gescand")
+            st.success("OCR toegepast")
+
+        except Exception as e:
+            st.warning("OCR mislukt")
 
     liters = st.number_input("Liters", value=float(liters))
     prijs = st.number_input("Prijs per liter", value=float(prijs))
@@ -140,8 +156,8 @@ def nieuwe_tankbeurt():
             st.success("Opgeslagen")
             st.rerun()
 
-        except:
-            st.error("Opslaan mislukt")
+        except Exception as e:
+            st.error(f"Opslaan mislukt: {e}")
 
 # -------------------------
 # DASHBOARD
@@ -157,23 +173,19 @@ def dashboard():
         return
 
     df = pd.DataFrame(data)
-
     df["kosten_per_km"] = df["totaal"] / df["km"]
 
-    # mobiele weergave
     for _, row in df.iterrows():
-        with st.container():
-            st.markdown(f"""
-            **{row['datum']}**  
-            {row['station']} - {row['brandstof']}  
-            {row['liters']} L | €{row['totaal']:.2f}  
-            €{row['kosten_per_km']:.2f}/km
-            """)
-            st.divider()
+        st.markdown(f"""
+        **{row['datum']}**  
+        {row['station']} - {row['brandstof']}  
+        {row['liters']}L | €{row['totaal']:.2f}  
+        €{row['kosten_per_km']:.2f}/km
+        """)
+        st.divider()
 
     st.metric("Totale kosten", f"€ {df['totaal'].sum():.2f}")
 
-    # verwijderen
     with st.expander("Verwijderen"):
         delete_id = st.selectbox("Selecteer", df["id"])
         if st.button("Verwijder"):
@@ -184,12 +196,12 @@ def dashboard():
 # -------------------------
 # MAIN
 # -------------------------
-if "user" not in st.session_state:
+if st.session_state.user is None:
     login()
 else:
     st.title("Brandstof")
 
-    tab1, tab2 = st.tabs(["➕ Nieuw", "📊 Overzicht"])
+    tab1, tab2 = st.tabs(["Nieuw", "Overzicht"])
 
     with tab1:
         nieuwe_tankbeurt()
@@ -198,5 +210,5 @@ else:
         dashboard()
 
     if st.button("Logout"):
-        st.session_state.clear()
+        st.session_state.user = None
         st.rerun()
