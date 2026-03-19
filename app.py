@@ -5,23 +5,32 @@ import requests
 from supabase import create_client
 from streamlit_cookies_manager import EncryptedCookieManager
 from google.cloud import vision
+from google.oauth2 import service_account
 from streamlit_geolocation import streamlit_geolocation
-import os
+import json
 
 # ------------------------
 # CONFIG
 # ------------------------
 st.set_page_config(page_title="Brandstof", layout="centered")
 
-# PWA
 st.markdown('<link rel="manifest" href="/.streamlit/manifest.json">', unsafe_allow_html=True)
 
 # ------------------------
-# SUPABASE
+# SUPABASE (via secrets)
 # ------------------------
-url = "https://tgwzdxwtshgviyxwalmo.supabase.co"
-key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRnd3pkeHd0c2hndml5eHdhbG1vIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5NDE2ODAsImV4cCI6MjA4OTUxNzY4MH0.41lUYaL9z0TYbN8xJu9ZIfjg23dVzJvInpDvVdeFOLE"
+url = st.secrets["SUPABASE_URL"]
+key = st.secrets["SUPABASE_KEY"]
 supabase = create_client(url, key)
+
+# ------------------------
+# GOOGLE OCR (via secrets)
+# ------------------------
+vision_client = None
+if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in st.secrets:
+    creds_dict = json.loads(st.secrets["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
+    credentials = service_account.Credentials.from_service_account_info(creds_dict)
+    vision_client = vision.ImageAnnotatorClient(credentials=credentials)
 
 # ------------------------
 # COOKIES
@@ -100,14 +109,24 @@ st.divider()
 page = st.segmented_control("Navigatie", ["Nieuwe invoer", "Dashboard"])
 
 # ------------------------
+# STATION LIJST
+# ------------------------
+stations = [
+    "shell","bp","esso","texaco","total","totalenergies",
+    "q8","avia","tango","tinq","firezone","tamoil",
+    "gulf","argos","haan","fieten","sakko",
+    "berkman","pin&go","pingo","ok"
+]
+
+def detect_station(text):
+    for s in stations:
+        if s in text:
+            return s.title()
+    return ""
+
+# ------------------------
 # OCR
 # ------------------------
-try:
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "brandstof-app-490719-1da7dbf30c40.json"
-    vision_client = vision.ImageAnnotatorClient()
-except:
-    vision_client = None
-
 def scan_bon(file):
     if not vision_client:
         return ""
@@ -115,23 +134,6 @@ def scan_bon(file):
     response = vision_client.text_detection(image=image)
     if response.text_annotations:
         return response.text_annotations[0].description
-    return ""
-
-# ------------------------
-# STATION LIJST
-# ------------------------
-stations = [
-    "shell","bp","esso","texaco","total","totalenergies",
-    "q8","avia","tango","tinq","firezone","tamoil",
-    "gulf","argos","haan","fieten","sakko",
-    "fuel up","kreuze","ok","snel tank",
-    "berkman","pin&go","pingo","pin go"
-]
-
-def detect_station(text):
-    for s in stations:
-        if s in text:
-            return s.title()
     return ""
 
 # ------------------------
@@ -172,7 +174,7 @@ def get_address(lat, lon):
         return ""
 
 # ------------------------
-# INPUT
+# NIEUWE INVOER
 # ------------------------
 if page == "Nieuwe invoer":
 
@@ -204,9 +206,7 @@ if page == "Nieuwe invoer":
         km = st.number_input("Kilometers", min_value=0.0)
         station = st.text_input("Tankstation", value=station_auto)
 
-        submitted = st.form_submit_button("Opslaan")
-
-        if submitted:
+        if st.form_submit_button("Opslaan"):
             totaal = liters * prijs
             adres = get_address(lat, lon) if lat else ""
 
@@ -242,7 +242,6 @@ if page == "Dashboard":
     df = pd.DataFrame(data)
     df["datum"] = pd.to_datetime(df["datum"])
 
-    # KPI
     col1, col2, col3 = st.columns(3)
 
     kosten = df["totaal"].sum()
@@ -255,7 +254,6 @@ if page == "Dashboard":
 
     st.divider()
 
-    # Grafieken
     st.subheader("Kosten over tijd")
     st.line_chart(df.set_index("datum")["totaal"])
 
@@ -263,7 +261,6 @@ if page == "Dashboard":
     df["maand"] = df["datum"].dt.to_period("M").astype(str)
     st.bar_chart(df.groupby("maand")["totaal"].sum())
 
-    # Kaart
     map_df = df.dropna(subset=["latitude","longitude"])
     if not map_df.empty:
         st.subheader("Locaties")
@@ -271,17 +268,15 @@ if page == "Dashboard":
 
     st.divider()
 
-    # Tabel
-    st.subheader("Overzicht")
-
-    cols = [c for c in df.columns if c not in ["id", "user_id"]]
-    st.dataframe(df[cols], use_container_width=True)
-
-    # Delete
     st.subheader("Verwijderen")
 
     delete_id = st.selectbox("Selecteer record", df["id"])
     confirm = st.checkbox("Bevestig verwijderen")
+
+    st.subheader("Overzicht")
+
+    cols = [c for c in df.columns if c not in ["id", "user_id"]]
+    st.dataframe(df[cols], use_container_width=True)\
 
     if st.button("Verwijder record") and confirm:
         supabase.table("tankbeurten").delete().eq("id", delete_id).execute()
