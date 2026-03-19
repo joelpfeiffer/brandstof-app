@@ -1,7 +1,12 @@
 import streamlit as st
 import pandas as pd
 from datetime import date
+import re
+import os
+import tempfile
+
 from supabase import create_client
+from google.cloud import vision
 
 # ------------------------
 # CONFIG
@@ -12,7 +17,22 @@ SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ------------------------
-# SESSION INIT
+# GOOGLE OCR INIT
+# ------------------------
+vision_client = None
+
+if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in st.secrets:
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+            f.write(st.secrets["GOOGLE_APPLICATION_CREDENTIALS_JSON"].encode())
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = f.name
+
+        vision_client = vision.ImageAnnotatorClient()
+    except:
+        vision_client = None
+
+# ------------------------
+# SESSION
 # ------------------------
 if "session" not in st.session_state:
     st.session_state.session = None
@@ -24,14 +44,57 @@ if "page" not in st.session_state:
     st.session_state.page = "login"
 
 # ------------------------
-# AUTH SESSION FIX
+# AUTH FIX
 # ------------------------
 def apply_session():
     if st.session_state.session:
-        access_token = st.session_state.session.session.access_token
-        refresh_token = st.session_state.session.session.refresh_token
+        supabase.auth.set_session(
+            st.session_state.session.session.access_token,
+            st.session_state.session.session.refresh_token
+        )
 
-        supabase.auth.set_session(access_token, refresh_token)
+# ------------------------
+# OCR SCAN
+# ------------------------
+def scan_bon(file):
+    if not vision_client:
+        return ""
+
+    content = file.read()
+
+    image = vision.Image(content=content)
+    response = vision_client.text_detection(image=image)
+
+    if response.text_annotations:
+        return response.text_annotations[0].description
+
+    return ""
+
+# ------------------------
+# PARSING
+# ------------------------
+def parse_bon(text):
+    liters = None
+    prijs = None
+    brandstof = None
+
+    # liters
+    match_liters = re.search(r"(\d+[.,]\d+)\s*(L|liter)", text, re.IGNORECASE)
+    if match_liters:
+        liters = float(match_liters.group(1).replace(",", "."))
+
+    # prijs
+    match_prijs = re.search(r"€?\s*(\d+[.,]\d+)", text)
+    if match_prijs:
+        prijs = float(match_prijs.group(1).replace(",", "."))
+
+    # brandstof
+    if "diesel" in text.lower():
+        brandstof = "diesel"
+    elif "95" in text:
+        brandstof = "euro 95"
+
+    return liters, prijs, brandstof
 
 # ------------------------
 # LOGIN
@@ -55,70 +118,75 @@ def login():
 
             st.rerun()
 
-        except Exception as e:
+        except:
             st.error("Login mislukt")
 
 # ------------------------
-# LOGOUT
-# ------------------------
-def logout():
-    st.session_state.session = None
-    st.session_state.user_id = None
-    st.session_state.page = "login"
-    st.rerun()
-
-# ------------------------
-# NAVIGATIE
+# NAV
 # ------------------------
 def navigation():
     col1, col2, col3 = st.columns(3)
 
-    with col1:
-        if st.button("Nieuwe tankbeurt"):
-            st.session_state.page = "nieuw"
+    if col1.button("Nieuwe tankbeurt"):
+        st.session_state.page = "nieuw"
 
-    with col2:
-        if st.button("Dashboard"):
-            st.session_state.page = "dashboard"
+    if col2.button("Dashboard"):
+        st.session_state.page = "dashboard"
 
-    with col3:
-        if st.button("Logout"):
-            logout()
+    if col3.button("Logout"):
+        st.session_state.session = None
+        st.rerun()
 
 # ------------------------
-# NIEUWE TANKBEURT
+# NIEUWE ENTRY
 # ------------------------
 def nieuwe_tankbeurt():
     st.subheader("Nieuwe tankbeurt")
 
+    # OCR upload
+    uploaded_file = st.file_uploader("Upload bon", type=["jpg", "png"])
+
+    liters = 0.0
+    prijs = 0.0
+    brandstof = ""
+
+    if uploaded_file:
+        text = scan_bon(uploaded_file)
+        st.text_area("Herkende tekst", text, height=150)
+
+        liters, prijs, brandstof = parse_bon(text)
+
     datum = st.date_input("Datum", value=date.today())
-    liters = st.number_input("Liters", min_value=0.0)
-    prijs = st.number_input("Prijs per liter (€)", min_value=0.0)
-    km = st.number_input("Gereden km", min_value=0.0)
+    liters = st.number_input("Liters", value=liters)
+    prijs = st.number_input("Prijs", value=prijs)
+    km = st.number_input("KM", value=0.0)
+
+    brandstof = st.selectbox(
+        "Brandstof",
+        ["", "euro 95", "diesel", "euro 98", "elektrisch"],
+        index=0 if brandstof == "" else ["", "euro 95", "diesel", "euro 98", "elektrisch"].index(brandstof)
+    )
 
     totaal = liters * prijs
-    kosten_per_km = totaal / km if km > 0 else 0
+    kosten_km = totaal / km if km > 0 else 0
 
     st.write(f"Totaal: €{totaal:.2f}")
-    st.write(f"Kosten per km: €{kosten_per_km:.2f}")
+    st.write(f"Kosten per km: €{kosten_km:.2f}")
 
     if st.button("Opslaan"):
-        try:
-            apply_session()
+        apply_session()
 
-            supabase.table("tankbeurten").insert({
-                "user_id": st.session_state.user_id,
-                "datum": str(datum),
-                "liters": liters,
-                "prijs": prijs,
-                "km": km,
-                "totaal": totaal
-            }).execute()
+        supabase.table("tankbeurten").insert({
+            "user_id": st.session_state.user_id,
+            "datum": str(datum),
+            "liters": liters,
+            "prijs": prijs,
+            "km": km,
+            "totaal": totaal,
+            "brandstof": brandstof
+        }).execute()
 
-            st.success("Opgeslagen")
-
-        except Exception as e:
-            st.error(f"Opslaan mislukt: {e}")
+        st.success("Opgeslagen")
 
 # ------------------------
 # DASHBOARD
@@ -126,48 +194,30 @@ def nieuwe_tankbeurt():
 def dashboard():
     st.subheader("Dashboard")
 
-    try:
+    apply_session()
+
+    res = supabase.table("tankbeurten").select("*").execute()
+    data = res.data
+
+    if not data:
+        st.warning("Geen data")
+        return
+
+    df = pd.DataFrame(data)
+    df_display = df.drop(columns=["id", "user_id"], errors="ignore")
+
+    st.dataframe(df_display)
+
+    st.write("Totale kosten:", df["totaal"].sum())
+
+    # DELETE
+    ids = df["id"].tolist()
+    selected = st.selectbox("Verwijder", ids)
+
+    if st.button("Delete"):
         apply_session()
-
-        res = supabase.table("tankbeurten").select("*").execute()
-        data = res.data
-
-        if not data:
-            st.warning("Geen data beschikbaar")
-            return
-
-        df = pd.DataFrame(data)
-
-        df_display = df.drop(columns=["id", "user_id"], errors="ignore")
-        st.dataframe(df_display, use_container_width=True)
-
-        totaal_kosten = df["totaal"].sum()
-        totaal_km = df["km"].sum()
-
-        st.write(f"Totale kosten: €{totaal_kosten:.2f}")
-
-        if totaal_km > 0:
-            st.write(f"Gemiddeld € per km: €{totaal_kosten / totaal_km:.2f}")
-
-        # DELETE
-        st.subheader("Verwijderen")
-
-        ids = df["id"].tolist()
-        selected_id = st.selectbox("Selecteer record", ids)
-
-        if st.button("Verwijder"):
-            apply_session()
-
-            supabase.table("tankbeurten") \
-                .delete() \
-                .eq("id", selected_id) \
-                .execute()
-
-            st.success("Verwijderd")
-            st.rerun()
-
-    except Exception as e:
-        st.error(f"Fout bij ophalen data: {e}")
+        supabase.table("tankbeurten").delete().eq("id", selected).execute()
+        st.rerun()
 
 # ------------------------
 # MAIN
@@ -184,6 +234,3 @@ else:
 
     elif st.session_state.page == "dashboard":
         dashboard()
-
-    else:
-        st.title("Welkom")
