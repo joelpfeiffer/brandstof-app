@@ -14,11 +14,10 @@ st.set_page_config(page_title="Brandstof", layout="centered")
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
-# basis client (zonder auth)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------
-# SESSION
+# SESSION STATE
 # -------------------------
 if "user" not in st.session_state:
     st.session_state.user = None
@@ -27,9 +26,12 @@ if "session" not in st.session_state:
     st.session_state.session = None
 
 # -------------------------
-# AUTH CLIENT (BELANGRIJK)
+# AUTH CLIENT (RLS FIX)
 # -------------------------
 def get_auth_client():
+    if st.session_state.session is None:
+        return None
+
     return create_client(
         SUPABASE_URL,
         SUPABASE_KEY,
@@ -41,9 +43,8 @@ def get_auth_client():
     )
 
 # -------------------------
-# OCR CLIENT
+# OCR CLIENT (GEEN CACHE BUG)
 # -------------------------
-@st.cache_resource
 def get_vision_client():
     try:
         credentials = service_account.Credentials.from_service_account_info({
@@ -54,24 +55,14 @@ def get_vision_client():
             "token_uri": "https://oauth2.googleapis.com/token",
         })
         return vision.ImageAnnotatorClient(credentials=credentials)
-    except:
+    except Exception as e:
+        st.warning(f"OCR niet actief: {e}")
         return None
 
 vision_client = get_vision_client()
 
 # -------------------------
-# CACHE DATA
-# -------------------------
-@st.cache_data(ttl=10)
-def load_data():
-    auth_supabase = get_auth_client()
-    return auth_supabase.table("tankbeurten") \
-        .select("id, datum, liters, prijs, km, totaal, brandstof, station") \
-        .order("datum", desc=True) \
-        .execute().data
-
-# -------------------------
-# PARSING
+# PARSE BON
 # -------------------------
 def parse_bon(text):
     liters = None
@@ -117,6 +108,10 @@ def login():
 # -------------------------
 def nieuwe_tankbeurt():
 
+    if st.session_state.session is None:
+        st.error("Niet ingelogd")
+        return
+
     st.subheader("Nieuwe tankbeurt")
 
     uploaded = st.file_uploader("Scan bon", type=["jpg", "png", "jpeg"])
@@ -137,8 +132,8 @@ def nieuwe_tankbeurt():
 
             st.success("OCR toegepast")
 
-        except:
-            st.warning("OCR mislukt")
+        except Exception as e:
+            st.warning(f"OCR mislukt: {e}")
 
     liters = st.number_input("Liters", value=float(liters))
     prijs = st.number_input("Prijs per liter", value=float(prijs))
@@ -160,6 +155,10 @@ def nieuwe_tankbeurt():
         try:
             auth_supabase = get_auth_client()
 
+            if auth_supabase is None:
+                st.error("Geen sessie")
+                return
+
             auth_supabase.table("tankbeurten").insert({
                 "user_id": st.session_state.user.id,
                 "datum": str(datetime.today().date()),
@@ -171,7 +170,6 @@ def nieuwe_tankbeurt():
                 "station": station
             }).execute()
 
-            st.cache_data.clear()
             st.success("Opgeslagen")
             st.rerun()
 
@@ -183,41 +181,52 @@ def nieuwe_tankbeurt():
 # -------------------------
 def dashboard():
 
-    st.subheader("Dashboard")
-
-    data = load_data()
-
-    if not data:
-        st.info("Nog geen data")
+    if st.session_state.session is None:
+        st.error("Niet ingelogd")
         return
 
-    df = pd.DataFrame(data)
-    df["kosten_per_km"] = df["totaal"] / df["km"]
+    st.subheader("Dashboard")
 
-    for _, row in df.iterrows():
-        st.markdown(f"""
-        **{row['datum']}**  
-        {row['station']} - {row['brandstof']}  
-        {row['liters']}L | €{row['totaal']:.2f}  
-        €{row['kosten_per_km']:.2f}/km
-        """)
-        st.divider()
+    try:
+        auth_supabase = get_auth_client()
 
-    st.metric("Totale kosten", f"€ {df['totaal'].sum():.2f}")
+        data = auth_supabase.table("tankbeurten") \
+            .select("*") \
+            .order("datum", desc=True) \
+            .execute().data
 
-    with st.expander("Verwijderen"):
-        delete_id = st.selectbox("Selecteer", df["id"])
+        if not data:
+            st.info("Nog geen data")
+            return
 
-        if st.button("Verwijder"):
-            auth_supabase = get_auth_client()
+        df = pd.DataFrame(data)
+        df["kosten_per_km"] = df["totaal"] / df["km"]
 
-            auth_supabase.table("tankbeurten") \
-                .delete() \
-                .eq("id", delete_id) \
-                .execute()
+        for _, row in df.iterrows():
+            st.markdown(f"""
+            **{row['datum']}**  
+            {row['station']} - {row['brandstof']}  
+            {row['liters']}L | €{row['totaal']:.2f}  
+            €{row['kosten_per_km']:.2f}/km
+            """)
+            st.divider()
 
-            st.cache_data.clear()
-            st.rerun()
+        st.metric("Totale kosten", f"€ {df['totaal'].sum():.2f}")
+
+        with st.expander("Verwijderen"):
+            delete_id = st.selectbox("Selecteer", df["id"])
+
+            if st.button("Verwijder"):
+                auth_supabase.table("tankbeurten") \
+                    .delete() \
+                    .eq("id", delete_id) \
+                    .execute()
+
+                st.success("Verwijderd")
+                st.rerun()
+
+    except Exception as e:
+        st.error(f"Dashboard fout: {e}")
 
 # -------------------------
 # MAIN
