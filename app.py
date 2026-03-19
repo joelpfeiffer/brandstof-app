@@ -17,28 +17,30 @@ SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------
-# SESSION INIT
+# TANKSTATIONS
 # -------------------------
-defaults = {
-    "user": None,
-    "session": None,
-    "liters": 0.0,
-    "prijs": 0.0,
-    "km": 0.0,
-    "brandstof": "euro 95",
-    "station": "Shell"
-}
+TANKSTATIONS = [
+    "Shell", "BP", "Esso", "Texaco", "Total", "Q8",
+    "Tango", "Firezone", "OK", "Gulf", "AVIA",
+    "Argos", "Tinq", "Sakko", "Lukoil",
+    "Fieten Olie", "Berkman", "De Haan", "Tamoil",
+    "Makro", "Sligro", "Anders"
+]
 
-for key, value in defaults.items():
-    if key not in st.session_state:
-        st.session_state[key] = value
+# -------------------------
+# SESSION
+# -------------------------
+if "user" not in st.session_state:
+    st.session_state.user = None
+if "session" not in st.session_state:
+    st.session_state.session = None
 
 # -------------------------
 # AUTH CLIENT
 # -------------------------
 def get_auth_client():
     session = st.session_state.session
-    if session is None or not hasattr(session, "access_token"):
+    if session is None:
         st.error("Niet ingelogd")
         return None
 
@@ -69,7 +71,7 @@ def get_vision_client():
 vision_client = get_vision_client()
 
 # -------------------------
-# OCR PARSER
+# OCR PARSE
 # -------------------------
 def parse_bon(text):
     text = text.lower()
@@ -85,13 +87,13 @@ def parse_bon(text):
         elif 1 < n < 5:
             prijs = n
 
-    if liters and not prijs and numbers:
-        prijs = max(numbers) / liters
+    if liters and prijs and prijs > 10:
+        prijs = prijs / liters
 
     return liters, prijs
 
 # -------------------------
-# GPS
+# GPS (simple)
 # -------------------------
 st.components.v1.html("""
 <script>
@@ -121,11 +123,9 @@ def login():
                 "email": email,
                 "password": password
             })
-
             st.session_state.user = res.user
             st.session_state.session = res.session
             st.rerun()
-
         except Exception as e:
             st.error(e)
 
@@ -138,28 +138,33 @@ def nieuwe():
 
     uploaded = st.file_uploader("Upload bon", type=["jpg", "png", "jpeg"])
 
+    liters = 0.0
+    prijs = 0.0
+
     if uploaded and vision_client:
         image = vision.Image(content=uploaded.read())
         response = vision_client.text_detection(image=image)
-        text = response.text_annotations[0].description if response.text_annotations else ""
 
+        text = response.text_annotations[0].description if response.text_annotations else ""
         st.text_area("OCR tekst", text, height=120)
 
         l, p = parse_bon(text)
-
         if l:
-            st.session_state.liters = l
+            liters = l
         if p:
-            st.session_state.prijs = p
+            prijs = p
 
-    st.number_input("Liters", key="liters")
-    st.number_input("Prijs per liter", key="prijs")
-    st.number_input("KM", key="km")
+    liters = st.number_input("Liters", value=liters)
+    prijs = st.number_input("Prijs per liter", value=prijs)
+    km = st.number_input("KM", value=0.0)
 
-    st.selectbox("Brandstof", ["euro 95", "diesel", "euro 98"], key="brandstof")
-    st.selectbox("Tankstation", ["Shell", "BP", "Esso", "Texaco"], key="station")
+    brandstof = st.selectbox("Brandstof", ["euro 95", "diesel", "euro 98"])
 
-    totaal = st.session_state.liters * st.session_state.prijs
+    station = st.selectbox("Tankstation", TANKSTATIONS)
+    if station == "Anders":
+        station = st.text_input("Naam tankstation")
+
+    totaal = liters * prijs
     st.metric("Totaal prijs", f"€ {totaal:.2f}")
 
     if st.button("Opslaan"):
@@ -176,25 +181,17 @@ def nieuwe():
             auth.table("tankbeurten").insert({
                 "user_id": st.session_state.user.id,
                 "datum": str(datetime.today().date()),
-                "liters": st.session_state.liters,
-                "prijs": st.session_state.prijs,
-                "km": st.session_state.km,
+                "liters": liters,
+                "prijs": prijs,
+                "km": km,
                 "totaal": totaal,
-                "brandstof": st.session_state.brandstof,
-                "station": st.session_state.station,
+                "brandstof": brandstof,
+                "station": station,
                 "latitude": lat,
                 "longitude": lon
             }).execute()
 
             st.success("Opgeslagen")
-
-            # RESET
-            st.session_state.liters = 0.0
-            st.session_state.prijs = 0.0
-            st.session_state.km = 0.0
-            st.session_state.brandstof = "euro 95"
-            st.session_state.station = "Shell"
-
             st.rerun()
 
         except Exception as e:
@@ -220,17 +217,40 @@ def dashboard():
 
         df = pd.DataFrame(data)
 
-        df = df.drop(columns=["id", "user_id", "latitude", "longitude"], errors="ignore")
-
-        st.dataframe(df, use_container_width=True)
-
         df["datum"] = pd.to_datetime(df["datum"])
+
+        totaal_kosten = df["totaal"].sum()
+        totaal_km = df["km"].sum()
+        totaal_liters = df["liters"].sum()
+
+        kosten_per_km = totaal_kosten / totaal_km if totaal_km > 0 else 0
+        gem_prijs = df["prijs"].mean()
+
+        col1, col2 = st.columns(2)
+        col1.metric("Totaal €", f"{totaal_kosten:.2f}")
+        col2.metric("€/km", f"{kosten_per_km:.3f}")
+
+        col1, col2 = st.columns(2)
+        col1.metric("Gem €/L", f"{gem_prijs:.2f}")
+        col2.metric("Beurten", len(df))
+
         df = df.sort_values("datum")
 
-        st.subheader("Kosten verloop")
+        st.subheader("Kosten")
         st.line_chart(df.set_index("datum")["totaal"])
 
-        map_df = pd.DataFrame(data).dropna(subset=["latitude", "longitude"])
+        st.subheader("Liters")
+        st.line_chart(df.set_index("datum")["liters"])
+
+        st.subheader("Overzicht")
+
+        df_display = df.drop(columns=["id", "user_id", "latitude", "longitude"], errors="ignore")
+
+        st.dataframe(df_display, use_container_width=True)
+
+        st.subheader("Kaart")
+
+        map_df = df.dropna(subset=["latitude", "longitude"])
         if not map_df.empty:
             st.map(map_df.rename(columns={"latitude": "lat", "longitude": "lon"}))
 
