@@ -17,16 +17,21 @@ SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # -------------------------
-# SESSION
+# SESSION INIT
 # -------------------------
-if "user" not in st.session_state:
-    st.session_state.user = None
+defaults = {
+    "user": None,
+    "session": None,
+    "liters": 0.0,
+    "prijs": 0.0,
+    "km": 0.0,
+    "brandstof": "euro 95",
+    "station": "Shell"
+}
 
-if "session" not in st.session_state:
-    st.session_state.session = None
-
-if "reset" not in st.session_state:
-    st.session_state.reset = False
+for key, value in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
 # -------------------------
 # AUTH CLIENT
@@ -132,9 +137,6 @@ def nieuwe():
 
     st.subheader("Nieuwe tankbeurt")
 
-    liters = 0.0
-    prijs = 0.0
-
     uploaded = st.file_uploader("Scan bon")
 
     if uploaded and vision_client:
@@ -147,18 +149,18 @@ def nieuwe():
         l, p = parse_bon(text)
 
         if l:
-            liters = l
+            st.session_state.liters = l
         if p:
-            prijs = p
+            st.session_state.prijs = p
 
-    liters = st.number_input("Liters", value=0.0 if st.session_state.reset else liters)
-    prijs = st.number_input("Prijs per liter", value=0.0 if st.session_state.reset else prijs)
-    km = st.number_input("KM", value=0.0)
+    st.number_input("Liters", key="liters")
+    st.number_input("Prijs per liter", key="prijs")
+    st.number_input("KM", key="km")
 
-    brandstof = st.selectbox("Brandstof", ["euro 95", "diesel", "euro 98"])
-    station = st.selectbox("Tankstation", ["Shell", "BP", "Esso", "Texaco"])
+    st.selectbox("Brandstof", ["euro 95", "diesel", "euro 98"], key="brandstof")
+    st.selectbox("Tankstation", ["Shell", "BP", "Esso", "Texaco"], key="station")
 
-    totaal = liters * prijs
+    totaal = st.session_state.liters * st.session_state.prijs
 
     st.metric("Totaal prijs", f"€ {totaal:.2f}")
 
@@ -170,22 +172,28 @@ def nieuwe():
 
         auth = get_auth_client()
 
-        res = auth.table("tankbeurten").insert({
+        auth.table("tankbeurten").insert({
             "user_id": st.session_state.user.id,
             "datum": str(datetime.today().date()),
-            "liters": liters,
-            "prijs": prijs,
-            "km": km,
+            "liters": st.session_state.liters,
+            "prijs": st.session_state.prijs,
+            "km": st.session_state.km,
             "totaal": totaal,
-            "brandstof": brandstof,
-            "station": station,
+            "brandstof": st.session_state.brandstof,
+            "station": st.session_state.station,
             "latitude": lat,
             "longitude": lon
         }).execute()
 
         st.success("Opgeslagen")
 
-        st.session_state.reset = True
+        # 🔥 RESET (WERKT NU ECHT)
+        st.session_state.liters = 0.0
+        st.session_state.prijs = 0.0
+        st.session_state.km = 0.0
+        st.session_state.brandstof = "euro 95"
+        st.session_state.station = "Shell"
+
         st.rerun()
 
 # -------------------------
@@ -214,10 +222,9 @@ def dashboard():
     st.subheader("Kosten verloop")
     st.line_chart(df.set_index("datum")["totaal"])
 
-    if "latitude" in data[0]:
-        map_df = pd.DataFrame(data).dropna(subset=["latitude", "longitude"])
-        if not map_df.empty:
-            st.map(map_df.rename(columns={"latitude": "lat", "longitude": "lon"}))
+    map_df = pd.DataFrame(data).dropna(subset=["latitude", "longitude"])
+    if not map_df.empty:
+        st.map(map_df.rename(columns={"latitude": "lat", "longitude": "lon"}))
 
 # -------------------------
 # MAIN
